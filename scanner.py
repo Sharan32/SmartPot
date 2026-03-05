@@ -317,21 +317,21 @@ def process_login_request():
 
 #------------------------------------------------
 # Main
-#------------------------------------------------
-
+#-----------------------------------------------
 def main():
 
     # Selenium driver
     if is_headless:
         options = webdriver.FirefoxOptions()
         options.headless = True
-        driver = webdriver.Firefox(options=options, service_log_path= logpath + common_paths["selenium_log"])
+        driver = webdriver.Firefox(options=options)
+
     else:
         options = {
             'suppress_connection_errors': False,
             'connection_timeout': None,
         }
-        driver = webdriver.Firefox(seleniumwire_options=options, service_log_path= logpath + common_paths["selenium_log"])
+        driver = webdriver.Firefox(seleniumwire_options=options)
 
     # ----- Login -----
     if is_login_auto:

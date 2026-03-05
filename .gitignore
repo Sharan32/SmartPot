@@ -2,3 +2,12 @@ images/*
 static/data.json
 utils/files/GeoLiteCity.dat
 honeypot_rulebase.py
+venv/
+__pycache__/
+*.pyc
+*.db
+*.log
+checkpoints/
+word2vec.bin
+images/
+extracted_fs/
