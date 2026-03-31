@@ -101,7 +101,11 @@ def crawl_by_selenium(ip, driver, manual_time):
 
     # Access to WebUI
     print("[*] Access to web server :", ip)
-    driver.get(ip)
+    try:
+        driver.get(ip)
+    except Exception as e:
+        print("[-] Failed initial access:", e)
+        return
     time.sleep(scan_params["timer"])
     
     # Login Operation
@@ -320,25 +324,29 @@ def process_login_request():
 #-----------------------------------------------
 def main():
 
-    # Selenium driver
-    if is_headless:
-        options = webdriver.FirefoxOptions()
-        options.headless = True
-        driver = webdriver.Firefox(options=options)
+    driver = None
+    if not requests_only:
+        # Selenium driver
+        if is_headless:
+            options = webdriver.FirefoxOptions()
+            options.headless = True
+            driver = webdriver.Firefox(options=options)
+        else:
+            options = {
+                'suppress_connection_errors': False,
+                'connection_timeout': None,
+            }
+            driver = webdriver.Firefox(seleniumwire_options=options)
 
-    else:
-        options = {
-            'suppress_connection_errors': False,
-            'connection_timeout': None,
-        }
-        driver = webdriver.Firefox(seleniumwire_options=options)
+        # Prevent indefinite blocking on firmware pages.
+        driver.set_page_load_timeout(max(10, scan_params["timer"] * 5))
 
     # ----- Login -----
-    if is_login_auto:
+    if (not requests_only) and is_login_auto:
         print("[*] Initial Login")
         first_login([ip+login_page for ip in ip_list], driver, scan_params["password"], scan_params["timer"])
 
-    elif is_login_manual:
+    elif (not requests_only) and is_login_manual:
         print("[*] Initial Login")
         timer = scan_params["timer"]+30
         if yes_no_input():
@@ -364,9 +372,11 @@ def main():
     
     print("[*] The number of all files :", len(urllist))
     
-    if container_num == 1:
+    if requests_only:
+        for ip in ip_list:
+            crawl_by_requests(ip, urllist)
+    elif container_num == 1:
         crawl_by_selenium(ip_list[0], driver, manual_time)
-        #crawl_by_requests(ip_list[0], urllist)
     else: 
         tpe = ThreadPoolExecutor(max_workers=container_num)
         for i in range(container_num):
@@ -380,7 +390,8 @@ def main():
         tpe.shutdown()
 
     # Finish
-    driver.quit()
+    if driver is not None:
+        driver.quit()
     print("[*] Crawling Time :", time.time() - start_time)
 
     # DB check
@@ -469,6 +480,7 @@ if __name__ == '__main__':
     parser.add_argument('--login-auto', action='store_true', help='The initial login is automatically performed.')
     parser.add_argument('--login-manual', action='store_true', help='The initial login is manually performed.')
     parser.add_argument('--headless', action='store_true', help='Hide the selenuim browser.')
+    parser.add_argument('--requests-only', action='store_true', help='Disable selenium crawling and use requests-only scanning.')
     parser.add_argument('-m', '--manual', type=int, default=0, help='If crawling is to be done manually, specify the number of seconds (default is 0, meaning automatic).')
     args = parser.parse_args()
 
@@ -478,6 +490,7 @@ if __name__ == '__main__':
     is_headless = args.headless
     is_login_auto = args.login_auto
     is_login_manual = args.login_manual
+    requests_only = args.requests_only
 
     # Time for manual operation in crawling
     manual_time = args.manual

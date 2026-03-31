@@ -12,7 +12,7 @@ import argparse
 import subprocess
 
 # My program
-from utils.utils import run_cmd
+from utils.utils import run_cmd, docker_cmd
 from utils.params import common_paths, docker_config
 
 #------------------------------------------------
@@ -29,7 +29,7 @@ def main():
     ip_list = []
     for i in range(container_num):
         container_name =  docker_config["container_name"] + str(i)
-        cmd = "sudo docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + container_name
+        cmd = docker_cmd("inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + container_name)
         result = run_cmd(cmd)
 
         if len(result) > 0:
@@ -39,7 +39,7 @@ def main():
 
     if len(ip_list) > 0:
         print("[*] Run scanner.py")
-        subprocess.run(["python3", "scanner.py", "--login-auto", "-i"] + ["http://" + ip for ip in ip_list])
+        subprocess.run(["python3", "scanner.py", "--requests-only", "-i"] + ["http://" + ip for ip in ip_list])
         #subprocess.run(["python3", "scanner.py", "-i"] + ["https://" + ip for ip in ip_list])
     else:
         print("[-] booter.py failed.")

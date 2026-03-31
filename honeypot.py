@@ -38,6 +38,7 @@ from utils.oov import MagnitudeOOV
 from utils.model import Encoder, Decoder
 from utils.params import common_paths, train_params, hardware_info
 from utils.http_headers import check_req_header, get_shaped_header
+from rl_agent import RLAgent
 
 
 #------------------------------------------------
@@ -70,6 +71,7 @@ JST = timezone(timedelta(hours=+9), 'JST')
 # Server
 ip = "0.0.0.0"
 port = 80
+
 honeypot_ip = socket.gethostbyname(socket.gethostname())
 
 # Connection timeout
@@ -144,7 +146,7 @@ def string_to_int(request_list, is_magnitude=False):
 
     return idx_list, oov_list
 
-def predict(idx_list, oov_list=None, moov=None):
+def predict(idx_list, oov_list=None, moov=None, k=1):
 
     inputs = tf.keras.preprocessing.sequence.pad_sequences([idx_list],
                                                            maxlen=train_params["max_input_len"],
@@ -168,11 +170,14 @@ def predict(idx_list, oov_list=None, moov=None):
                                                              dec_hidden,
                                                              enc_out)
 
-        predicted_id = tf.argmax(predictions[0]).numpy()
-
-        result.append(predicted_id)
-
-        dec_input = tf.expand_dims([predicted_id], 0)
+        if k == 1:
+            predicted_id = tf.argmax(predictions[0]).numpy()
+            result.append(predicted_id)
+            dec_input = tf.expand_dims([predicted_id], 0)
+        else:
+            top_k = tf.nn.top_k(predictions[0], k)
+            result.extend(top_k.indices.numpy().tolist())
+            dec_input = tf.expand_dims([result[0]], 0)
 
     return result
 
@@ -344,27 +349,43 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
             # Predict Response_id 
             #------------------------------------
 
-            if is_magnitude:
-                idx_list, oov_list = string_to_int(request_list, is_magnitude=True)
-                print("[*] idx List :", idx_list)
-                if len(oov_list) == 0:
-                    prediction = predict(idx_list)
-                else:
-                    prediction = predict(idx_list, oov_list=oov_list, moov=moov)
-                res_id = int(prediction[0])    
+            k = 3
+            context = (req_path, req_method)
 
-            else:
-                idx_list, _ = string_to_int(request_list)
-                print("[*] idx List :", idx_list)
-                prediction = predict(idx_list)
-                res_id = int(prediction[0])    
+            try:
+                if is_magnitude:
+                    idx_list, oov_list = string_to_int(request_list, is_magnitude=True)
+                    print("[*] idx List :", idx_list)
+                    if len(oov_list) == 0:
+                        candidates = predict(idx_list, k=k)
+                    else:
+                        candidates = predict(idx_list, oov_list=oov_list, moov=moov, k=k)
+
+                else:
+                    idx_list, _ = string_to_int(request_list)
+                    print("[*] idx List :", idx_list)
+                    candidates = predict(idx_list, k=k)
+            except Exception as e:
+                logging_system(f"Prediction failed: {e}, falling back to default", True, False)
+                candidates = [0]  # fallback
+
+            try:
+                res_id = rl_agent.select_response(context, candidates)
+            except Exception as e:
+                logging_system(f"RL selection failed: {e}, falling back to {candidates[0] if candidates else 0}", True, False)
+                res_id = candidates[0] if candidates else 0
 
             #------------------------------------
             # Parse a Response
             #------------------------------------
 
-            c.execute('select res_status, res_headers, res_body from response_table where res_id = ?', (res_id,))
-            response_list = c.fetchall()[0]
+            try:
+                c.execute('select res_status, res_headers, res_body from response_table where res_id = ?', (res_id,))
+                response_list = c.fetchall()[0]
+            except IndexError:
+                # Fallback to res_id 0 or 1
+                c.execute('select res_status, res_headers, res_body from response_table where res_id = 1')
+                response_list = c.fetchall()[0]
     
             res_status = response_list[0]
             res_headers = response_list[1]
@@ -412,9 +433,15 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(bytes(res_body))
 
             self.wfile.flush()
+
+            # Update RL reward
+            try:
+                rl_agent.update_reward(context, res_id, 1)
+            except Exception as e:
+                logging_system(f"RL update failed: {e}", True, False)
             
             # Logging
-            logging_access("{n}[{time}]{s}{clientip}{n}{method}{s}{path}{s}{query}{s}{body}{n}{headers}{n}{status_code}{s}{prediction}{n}".format(
+            logging_access("{n}[{time}]{s}{clientip}{n}{method}{s}{path}{s}{query}{s}{body}{n}{headers}{n}{status_code}{s}{selected}{s}{candidates}{n}".format(
                                                                     time=get_time(),
                                                                     clientip=clientip,
                                                                     method=str(req_method),
@@ -423,7 +450,8 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
                                                                     body=repr(req_body),
                                                                     headers=repr(req_headers),
                                                                     status_code=str(res_status),
-                                                                    prediction=str(prediction[0]),
+                                                                    selected=str(res_id),
+                                                                    candidates=str(candidates),
                                                                     s=' ',
                                                                     n='\n'
                                                                     ))            
@@ -478,7 +506,10 @@ if __name__ == '__main__':
     # Define Arguments
     parser = argparse.ArgumentParser(description='Honeypot program')
     parser.add_argument('-m', '--magnitude', action='store_true', help='Use the Magnitude Mechanism to Respond.')
+    parser.add_argument('-p', '--port', type=int, default=int(os.getenv('FIRMPOT_PORT', '80')), help='Port to bind honeypot server (default: 80).')
     args = parser.parse_args()
+
+    port = args.port
     
     # Logfile paths
     if not os.path.exists(common_paths["logs"]):
@@ -517,6 +548,9 @@ if __name__ == '__main__':
         moov, encoder, decoder = get_model(word2vec_path)
     else:
         encoder, decoder = get_model()
+
+    # RL Agent
+    rl_agent = RLAgent()
 
     main()
 

@@ -27,6 +27,7 @@ def prepare_honeypot(local_path):
 
 	# Copy a honeypot.py
 	run_cmd("cp ./honeypot.py " + local_path)
+	run_cmd("cp ./rl_agent.py " + local_path)
 
 	# Copy the response.db
 	run_cmd("cp " + common_paths["directory"] + common_paths["response_db"] + " " + local_path) # response_db

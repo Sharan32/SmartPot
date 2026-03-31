@@ -162,7 +162,7 @@ def create_startup(dir_path, startup_path):
 
         f.writelines("/bin/ash\n")
 
-    run_cmd("sudo chmod 777 " + startup_path)
+    run_cmd("chmod 777 " + startup_path)
 
 def run_containers(container_num, docker_config):
     """Run as many containers as the number of <container_num> according to the setting of <docker_config>."""
@@ -171,11 +171,14 @@ def run_containers(container_num, docker_config):
 
         # Create a docker network
         subnet = docker_config["ip_1st_octet"] + "." + str(int(docker_config["ip_2nd_octet"])+i) + "." + docker_config["ip_3rd_octet"] + "." + docker_config["ip_4th_octet"] + docker_config["subnet_mask"]
-        cmd = 'sudo docker network create --driver=bridge --subnet=' + subnet + ' ' + docker_config["network_name"] + str(i)
+        cmd = docker_cmd('network create --driver=bridge --subnet=' + subnet + ' ' + docker_config["network_name"] + str(i)
+)
         run_cmd(cmd)
 
         # Create a docker container
-        cmd = 'sudo docker run -itd --privileged --net=' + docker_config["network_name"] + str(i) + ' --name=' + docker_config["container_name"] + str(i) + " " + docker_config["image_name"]
+        cmd = docker_cmd(
+            'run -itd --privileged --net=' + docker_config["network_name"] + str(i) + ' --name=' + docker_config["container_name"] + str(i) + " " + docker_config["image_name"]
+        )
         print("[*] Run :", cmd)
         run_cmd(cmd)
 
@@ -184,7 +187,7 @@ def run_containers(container_num, docker_config):
     ip_list = []
     for i in range(container_num):
         container_name =  docker_config["container_name"] + str(i)
-        cmd = "sudo docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + container_name
+        cmd = docker_cmd("inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + container_name)
         result = run_cmd(cmd)
 
         if len(result) > 0:
@@ -281,7 +284,7 @@ def main():
     run_cmd("echo 'CMD ["+ '"./' + startup_path.split('/')[-1] + '"]' + "' >> Dockerfile")
 
     # [7] Build a docker image
-    run_cmd('sudo docker build -t ' + docker_config["image_name"] + ' .')
+    run_cmd(docker_cmd('build -t ' + docker_config["image_name"] + ' .'))
 
     # [8] Run docker containers
     if container_num == 0:
@@ -357,4 +360,3 @@ if __name__ == '__main__':
         sys.exit(0)
 
     main()
-
