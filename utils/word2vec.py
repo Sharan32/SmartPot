@@ -11,22 +11,23 @@ import argparse
 import numpy as np
 np.seterr(all='ignore')
 
-# Matplotlib
-import matplotlib.cm as cm
-import matplotlib.pyplot as plt
-
 # Word2vec
 from gensim.models import word2vec
 from gensim.models import KeyedVectors
 
-# Dimension reduction
-from sklearn.manifold import TSNE
-from sklearn.decomposition import PCA
-
 # My program
-from oov import MagnitudeOOV
-from utils import yes_no_input
-from params import common_paths, train_params, word2vec_params
+from utils.oov import MagnitudeOOV
+from utils.utils import yes_no_input
+from utils.params import common_paths, train_params, word2vec_params
+
+try:
+    import matplotlib.cm as cm
+    import matplotlib.pyplot as plt
+    from sklearn.manifold import TSNE
+    from sklearn.decomposition import PCA
+    HAS_PLOT_DEPS = True
+except ImportError:
+    HAS_PLOT_DEPS = False
 
 #------------------------------------------------
 # Prepare Dataset
@@ -114,6 +115,9 @@ def print_magnitude(model, moov, oov_words):
 
 
 def plot_word2vec(model, word_list, w2vplot_path):
+    if not HAS_PLOT_DEPS:
+        print("[-] matplotlib/sklearn are required for plotting. Skipping plot.")
+        return
 
     data = tuple([model[w] for w in word_list])
     X = np.vstack(data)
@@ -133,6 +137,9 @@ def plot_word2vec(model, word_list, w2vplot_path):
     fig.savefig(w2vplot_path)
 
 def plot_word2vec_pca(model, word_list, w2vplot_path):
+    if not HAS_PLOT_DEPS:
+        print("[-] matplotlib/sklearn are required for plotting. Skipping plot.")
+        return
 
     # Existing Words
     data = []
@@ -140,7 +147,7 @@ def plot_word2vec_pca(model, word_list, w2vplot_path):
         try:
             data.append(model[word])
         except:
-            words.remove(word)
+            word_list.remove(word)
 
     pca = PCA(n_components=2)
     pca.fit(data)
@@ -160,6 +167,9 @@ def plot_word2vec_pca(model, word_list, w2vplot_path):
 
 
 def plot_magnitude(model, moov, oov_word_list, w2vplot_path):
+    if not HAS_PLOT_DEPS:
+        print("[-] matplotlib/sklearn are required for plotting. Skipping plot.")
+        return
 
     oov_data = []
     add_data = []
@@ -173,7 +183,7 @@ def plot_magnitude(model, moov, oov_word_list, w2vplot_path):
         try:
             oov_data.append(moov.query(word))
         except:
-            oov_words.remove(word)
+            oov_word_list.remove(word)
             continue
 
         vector = moov.query(word)
@@ -191,7 +201,7 @@ def plot_magnitude(model, moov, oov_word_list, w2vplot_path):
 
     for i in range(len(data_pca)):
         plt.plot(data_pca[i][0], data_pca[i][1], ms=5.0, zorder=2, marker="o", color=colors[i])
-        plt.annotate(oov_words[i], (data_pca[i][0], data_pca[i][1]), size=12)
+        plt.annotate(oov_word_list[i], (data_pca[i][0], data_pca[i][1]), size=12)
 
     pca.fit(add_data)
     data_pca= pca.transform(add_data)
@@ -283,7 +293,7 @@ if __name__ == '__main__':
 
     else: # both are specified
         print("[?] Do you want to allow overwriting of", w2v_path)
-        if yes_no_input:
+        if yes_no_input():
             if os.path.exists(db_path):
                 conn_lrn = sqlite3.connect(db_path)
                 c_lrn = conn_lrn.cursor()
@@ -297,7 +307,7 @@ if __name__ == '__main__':
     w2vplot_path = common_paths["word2vec_plot"]
     if os.path.exists(w2vplot_path):
         print("[?] Do you want to allow overwriting of", w2vplot_path)
-        if not yes_no_input:
+        if not yes_no_input():
             sys.exit(0)
 
     # Word_list

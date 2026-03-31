@@ -10,8 +10,8 @@ sys.dont_write_bytecode = True
 import argparse
 
 # My program
-from params import boot_params, docker_config
-from utils import *
+from utils.params import boot_params, docker_config
+from utils.utils import run_cmd, yes_no_input
 
 #------------------------------------------------
 # Main
@@ -87,4 +87,3 @@ if __name__ == '__main__':
     args = parser.parse_args() 
     
     main()
-

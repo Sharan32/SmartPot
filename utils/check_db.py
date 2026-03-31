@@ -12,7 +12,7 @@ pd.set_option('display.max_rows', None)
 pd.set_option('display.max_columns', None)
 
 # My program
-from params import common_paths
+from utils.params import common_paths
 
 #------------------------------------------------
 # Main 
@@ -181,4 +181,3 @@ if __name__ == '__main__':
 
 	
 	main()
-

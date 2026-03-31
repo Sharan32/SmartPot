@@ -8,8 +8,8 @@ sys.dont_write_bytecode = True
 import argparse
 
 # My program
-from utils import *
-from params import docker_config
+from utils.utils import run_cmd
+from utils.params import docker_config
 
 #------------------------------------------------
 # Main
@@ -79,5 +79,4 @@ if __name__ == '__main__':
     container_num = args.containers
 
     main()
-
 
