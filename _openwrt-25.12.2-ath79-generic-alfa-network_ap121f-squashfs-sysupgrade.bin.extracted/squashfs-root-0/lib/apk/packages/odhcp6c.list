@@ -1,0 +1,5 @@
+/etc/odhcp6c.user
+/lib/netifd/dhcpv6.script
+/lib/netifd/proto/dhcpv6.sh
+/lib/upgrade/keep.d/odhcp6c
+/usr/sbin/odhcp6c

@@ -81,7 +81,7 @@ echo "---- GeoIP Data ----"
 if [ -f "./utils/files/GeoLiteCity.dat" ]; then
     echo "[OK] GeoLiteCity.dat present"
 else
-    echo "[MISSING] GeoLiteCity.dat missing"
+    echo "[WARN] GeoLiteCity.dat missing (only required for geographic log visualization)"
 fi
 
 echo ""

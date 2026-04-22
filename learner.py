@@ -82,11 +82,54 @@ def create_mapping_table(dir_path, map_obj):
     c.execute('select max(res_id) from response_table')
     max_id = c.fetchall()[0][0]
 
-    if max_id > train_params["max_index"]:
+    if max_id is not None and max_id > train_params["max_index"]:
         train_params["max_index"] = max_id
 
     conn.commit()
     conn.close() 
+
+
+def build_synthetic_dataset():
+    """Provide a minimal bootstrap dataset when scanner output is sparse."""
+    return [
+        (
+            ("GET", "/", "<EMP>", "Host:#localhost@@@User-Agent:#curl/7.0", "<EMP>"),
+            (0, 200, "Content-Type: text/html; charset=utf-8@@@Connection: close", b"<html><body><h1>FirmPot</h1></body></html>"),
+        ),
+        (
+            ("GET", "/admin", "<EMP>", "Host:#localhost@@@User-Agent:#curl/7.0", "<EMP>"),
+            (1, 403, "Content-Type: text/html; charset=utf-8@@@Connection: close", b"<html><body><h1>403 Forbidden</h1></body></html>"),
+        ),
+        (
+            ("POST", "/login", "<EMP>", "Host:#localhost@@@Content-Type:#application/x-www-form-urlencoded", "username=admin&password=admin"),
+            (2, 302, "Location: /cgi-bin/luci@@@Set-Cookie: session_id=demo; Path=/", b""),
+        ),
+        (
+            ("GET", "/cgi-bin/luci", "<EMP>", "Host:#localhost@@@User-Agent:#curl/7.0", "<EMP>"),
+            (3, 200, "Content-Type: text/html; charset=utf-8@@@Connection: close", b"<html><body><h1>LuCI</h1></body></html>"),
+        ),
+    ]
+
+
+def seed_minimal_training_data(conn_lrn, conn_rsp):
+    """Seed synthetic request/response pairs so training and demos have baseline data."""
+    synthetic_rows = build_synthetic_dataset()
+    c_lrn = conn_lrn.cursor()
+    c_rsp = conn_rsp.cursor()
+
+    for request_row, response_row in synthetic_rows:
+        res_id, res_status, res_headers, res_body = response_row
+        c_rsp.execute(
+            "INSERT OR IGNORE INTO response_table values(?, ?, ?, ?)",
+            (res_id, res_status, res_headers, res_body),
+        )
+        c_lrn.execute(
+            "INSERT OR IGNORE INTO learning_table values(?, ?, ?, ?, ?, ?)",
+            (*request_row, res_id),
+        )
+
+    conn_rsp.commit()
+    conn_lrn.commit()
 
 #------------------------------------------------
 # Shape the Word2Vec Matrix for Embedding
@@ -319,6 +362,7 @@ if __name__ == '__main__':
     db_path = dir_path + common_paths["learning_db"]
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
+    response_conn = sqlite3.connect(dir_path + common_paths["response_db"])
 
     map_obj = Mapping(db_path)    
     train_params["mapping"] = map_obj.mapping
@@ -342,6 +386,19 @@ if __name__ == '__main__':
     # Response
     c.execute('select res_id from learning_table')
     res_data = c.fetchall()
+
+    if len(req_data) < 4 or len(res_data) < 4:
+        print("[!] Sparse learning data detected. Seeding synthetic baseline interactions.")
+        seed_minimal_training_data(conn, response_conn)
+        c.execute('select req_method, req_path, req_query, req_headers, req_body from learning_table')
+        req_data = c.fetchall()
+        c.execute('select res_id from learning_table')
+        res_data = c.fetchall()
+
+        map_obj = Mapping(db_path)
+        train_params["mapping"] = map_obj.mapping
+        train_params["max_index"] = map_obj.mapping_size
+        create_mapping_table(dir_path, train_params["mapping"])
 
     # Split data to train
     split_rate = args.split
@@ -373,6 +430,7 @@ if __name__ == '__main__':
     # DB close
     conn.commit()
     conn.close() 
+    response_conn.close()
 
     # ----- Prepare a Word2Vec Model -----
 
@@ -391,7 +449,7 @@ if __name__ == '__main__':
 
     else:
         print("[-] Could not find", word2vec_path)
-        sys.exit(0)
+        sys.exit(1)
 
     # Define Model
     encoder = Encoder(train_params["max_index"], train_params["embed_size"], train_params["hidden_size"], train_params["batch_size"], embedding_matrix)
@@ -409,4 +467,3 @@ if __name__ == '__main__':
 
     # Main
     main()
-

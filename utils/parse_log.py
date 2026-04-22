@@ -97,7 +97,15 @@ def analyze_log(logfile, access_df):
 def create_json(access_df):
 
     # GeoIP
-    gi = pygeoip.GeoIP('./utils/files/GeoLiteCity.dat', pygeoip.const.MEMORY_CACHE)
+    geoip_path = './utils/files/GeoLiteCity.dat'
+    if not os.path.exists(geoip_path):
+        print(f"[!] GeoIP database not found at {geoip_path}. Writing empty map data.")
+        with open('./static/data.json', 'w+') as dataFile:
+            dataFile.write("var data = ")
+            json.dump([], dataFile)
+        return
+
+    gi = pygeoip.GeoIP(geoip_path, pygeoip.const.MEMORY_CACHE)
 
     ip_df = access_df.loc[:, ["date", "src_ip", "dst_ip"]]
     ip_df = ip_df.drop_duplicates(["date", "src_ip", "dst_ip"])

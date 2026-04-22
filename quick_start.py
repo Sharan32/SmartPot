@@ -11,6 +11,11 @@ import os
 import subprocess
 import sys
 
+from rl_agent import RLAgent
+
+
+DEFAULT_PORT = int(os.getenv("FIRMPOT_PORT", "8080"))
+
 
 def check_setup():
     """Check if honeypot_instance is ready"""
@@ -45,12 +50,12 @@ def start_honeypot():
         print(f"[*] Working directory: {cwd}")
         print("[*] Starting: python3 honeypot.py -m\n")
         print("=" * 70)
-        print("Server is running on http://localhost:8080")
+        print(f"Server is running on http://localhost:{DEFAULT_PORT}")
         print("Press Ctrl+C to stop\n")
         print("Test commands (in another terminal):")
-        print("  curl http://localhost:8080/")
-        print("  curl http://localhost:8080/health | jq .")
-        print("  curl http://localhost:8080/metrics | jq .")
+        print(f"  curl http://localhost:{DEFAULT_PORT}/")
+        print(f"  curl http://localhost:{DEFAULT_PORT}/health | jq .")
+        print(f"  curl http://localhost:{DEFAULT_PORT}/metrics | jq .")
         print("=" * 70 + "\n")
         
         subprocess.run(["python3", "honeypot.py", "-m"])
@@ -69,32 +74,56 @@ def show_options():
     
     print("\n1. START HONEYPOT SERVER (Recommended)")
     print("   $ python3 quick_start.py start")
-    print("   Starts the honeypot on http://localhost:8080")
+    print(f"   Starts the honeypot on http://localhost:{DEFAULT_PORT}")
     
     print("\n2. TEST HONEYPOT (Run in another terminal)")
-    print("   $ curl http://localhost:8080/")
-    print("   $ curl http://localhost:8080/metrics | jq .")
-    
+    print(f"   $ curl http://localhost:{DEFAULT_PORT}/")
+    print(f"   $ curl http://localhost:{DEFAULT_PORT}/metrics | jq .")
+
     print("\n3. VIEW DOCUMENTATION")
     print("   $ cat QUICKSTART.md")
     print("   $ cat IMPLEMENTATION_SUMMARY.md")
     print("   $ python3 DEMO_GUIDE.py")
-    
-    print("\n4. GENERATE NEW HONEYPOT (If you have firmware)")
+
+    print("\n4. VERIFY RL LEARNING")
+    print("   $ python3 quick_start.py rl_check")
+
+    print("\n5. GENERATE NEW HONEYPOT (If you have firmware)")
     print("   $ python3 run_all.py /path/to/firmware.bin")
     
     print("\n" + "=" * 70 + "\n")
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "start":
+    if len(sys.argv) <= 1:
+        show_options()
+        return
+
+    if sys.argv[1] == "start":
         if check_setup():
             start_honeypot()
         else:
             print("[!] Setup incomplete. Please run from FirmPot root directory.")
             sys.exit(1)
-    else:
-        show_options()
+        return
+
+    if sys.argv[1] == "rl_check":
+        rl_db = os.path.join("honeypot_instance", "rl.db")
+        if not os.path.exists(rl_db):
+            print("[!] RL database not found. Start the honeypot and generate some traffic first.")
+            sys.exit(1)
+
+        agent = RLAgent(rl_db)
+        try:
+            report = agent.verify_rl_learning()
+            print(report["recommendation"])
+            print(f"Unique states: {report['total_unique_states']}")
+            print(f"Total Q entries: {report['total_q_entries']}")
+        finally:
+            agent.close()
+        return
+
+    show_options()
 
 
 if __name__ == "__main__":

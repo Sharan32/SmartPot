@@ -1,0 +1,5 @@
+/etc/owut.d/pre-install.sh
+/etc/uci-defaults/51-attendedsysupgrade-owut
+/lib/upgrade/keep.d/owut
+/usr/bin/owut
+/usr/share/ucode/utils/argparse.uc

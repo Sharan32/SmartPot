@@ -28,20 +28,32 @@ def prepare_honeypot(local_path):
 	# Copy a honeypot.py
 	run_cmd("cp ./honeypot.py " + local_path)
 	run_cmd("cp ./rl_agent.py " + local_path)
+	run_cmd("cp ./detection.py " + local_path)
+	run_cmd("cp ./logger.py " + local_path)
+	run_cmd("cp ./metrics.py " + local_path)
+	run_cmd("cp ./session_manager.py " + local_path)
 
 	# Copy the response.db
 	run_cmd("cp " + common_paths["directory"] + common_paths["response_db"] + " " + local_path) # response_db
 
 	# Copy the checkpoints of model
 	run_cmd("mkdir " + local_path + common_paths["checkpoints"])
-	with open(common_paths["directory"] + common_paths["checkpoints"] + "checkpoint", 'r') as f:
-		lines =  f.readlines()
-	ckpt = lines[-1].split(" ")[-1][:-1]
-	run_cmd("cp " + common_paths["directory"] + common_paths["checkpoints"] + "checkpoint" + " " + local_path + common_paths["checkpoints"])
-	run_cmd("cp " + common_paths["directory"] + common_paths["checkpoints"] + "*" + ckpt + "* " + local_path + common_paths["checkpoints"])
+	checkpoint_file = common_paths["directory"] + common_paths["checkpoints"] + "checkpoint"
+	if os.path.exists(checkpoint_file):
+		with open(checkpoint_file, 'r') as f:
+			lines =  f.readlines()
+		ckpt = lines[-1].split(" ")[-1][:-1]
+		run_cmd("cp " + checkpoint_file + " " + local_path + common_paths["checkpoints"])
+		run_cmd("cp " + common_paths["directory"] + common_paths["checkpoints"] + "*" + ckpt + "* " + local_path + common_paths["checkpoints"])
+	else:
+		print("[!] No trained checkpoints found. Creating honeypot instance without model checkpoints.")
 
 	# Copy the word2vec.bin
-	run_cmd("cp " + common_paths["directory"] + common_paths["word2vec"] + " " + local_path)
+	word2vec_path = common_paths["directory"] + common_paths["word2vec"]
+	if os.path.exists(word2vec_path):
+		run_cmd("cp " + word2vec_path + " " + local_path)
+	else:
+		print("[!] No word2vec model found. The generated honeypot will run without Magnitude mode.")
 	run_cmd("mkdir " + local_path + "utils/") # utils
 	
 	run_cmd("cp utils/oov.py " + local_path + "utils/")
@@ -172,6 +184,7 @@ if __name__ == '__main__':
 	parser.add_argument('-i', '--ip', default="", help='Specify the IP address of the REMOTE machine.')
 	parser.add_argument('-u', '--username', default="", help='Specify the username for ssh of the REMOTE machine.')
 	parser.add_argument('-p', '--password', default="", help='Specify the password for ssh of the REMOTE machine.')
+	parser.add_argument('-y', '--yes', action='store_true', help='Automatically answer yes to overwrite prompts.')
 
 	args = parser.parse_args()
 
@@ -180,7 +193,7 @@ if __name__ == '__main__':
 	# Flags
 	if not (args.create or args.put or args.run or args.get or args.stop):
 		print("[-] Select one or more flags.")
-		sys.exit(0)
+		sys.exit(1)
 
 	# Instance Information
 	remote_remote_host = args.ip
@@ -195,9 +208,9 @@ if __name__ == '__main__':
 		if len(os.listdir(local_path)) != 0:
 			print("[!] There are already files in %s" % local_path)
 			print("[?] Do you want to allow overwriting?")
-			if not yes_no_input():
+			if not (args.yes or yes_no_input()):
 				print("[-] Finish")
-				sys.exit(0)
+				sys.exit(1)
 	if not local_path.endswith("/"):
 		local_path = local_path + "/"
 

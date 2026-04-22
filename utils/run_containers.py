@@ -18,14 +18,20 @@ from utils.params import docker_config
 def run_containers(container_num, docker_config):
     
     for i in range(container_num):
+        container_name = docker_config["container_name"] + str(i)
+        network_name = docker_config["network_name"] + str(i)
+
+        # Clean up leftovers from previous runs so repeated pipeline executions are idempotent.
+        run_cmd(docker_cmd('rm -f ' + container_name + ' >/dev/null 2>&1'))
+        run_cmd(docker_cmd('network rm ' + network_name + ' >/dev/null 2>&1'))
 
         # Create network
         subnet = docker_config["ip_1st_octet"] + "." + str(int(docker_config["ip_2nd_octet"])+i) + "." + docker_config["ip_3rd_octet"] + "." + docker_config["ip_4th_octet"] + docker_config["subnet_mask"]
-        cmd = docker_cmd('network create --driver=bridge --subnet=' + subnet + ' ' + docker_config["network_name"] + str(i))
+        cmd = docker_cmd('network create --driver=bridge --subnet=' + subnet + ' ' + network_name)
         run_cmd(cmd)
 
         # Create container
-        cmd = docker_cmd('run -itd --privileged --net=' + docker_config["network_name"] + str(i) + ' --name=' + docker_config["container_name"] + str(i) + " " + docker_config["image_name"])
+        cmd = docker_cmd('run -itd --privileged --net=' + network_name + ' --name=' + container_name + " " + docker_config["image_name"])
         print("[*] Run :", cmd)
         run_cmd(cmd)
 
@@ -37,7 +43,7 @@ def run_containers(container_num, docker_config):
         cmd = docker_cmd("inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + container_name)
         result = run_cmd(cmd)
 
-        if len(result) > 0:
+        if len(result) > 0 and result[0]:
             success_list.append(container_name)
             ip_list.append(result[0])
         else:

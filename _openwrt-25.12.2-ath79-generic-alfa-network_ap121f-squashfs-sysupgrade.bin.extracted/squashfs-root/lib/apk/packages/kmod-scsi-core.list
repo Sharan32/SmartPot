@@ -1,0 +1,5 @@
+/etc/modules-boot.d/40-scsi-core
+/etc/modules.d/40-scsi-core
+/lib/modules/6.12.74/scsi_common.ko
+/lib/modules/6.12.74/scsi_mod.ko
+/lib/modules/6.12.74/sd_mod.ko

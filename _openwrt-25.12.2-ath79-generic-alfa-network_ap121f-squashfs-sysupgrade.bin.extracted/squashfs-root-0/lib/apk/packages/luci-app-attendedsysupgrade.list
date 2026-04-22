@@ -1,0 +1,6 @@
+/etc/uci-defaults/95-luci-app-attendedsysupgrade-housekeeping
+/usr/share/luci/menu.d/luci-app-attendedsysupgrade.json
+/usr/share/rpcd/acl.d/luci-app-attendedsysupgrade.json
+/www/luci-static/resources/view/attendedsysupgrade/configuration.js
+/www/luci-static/resources/view/attendedsysupgrade/overview.js
+/www/luci-static/resources/view/status/include/11_upgrades.js

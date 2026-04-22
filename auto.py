@@ -23,7 +23,12 @@ def main():
 
     # [1] Booter
     print("[*] Run booter.py")
-    subprocess.run(["python3", "booter.py", firmware_path, "-c", str(container_num)])
+    booter_result = subprocess.run(
+        ["python3", "booter.py", firmware_path, "-c", str(container_num), "--yes"]
+    )
+    if booter_result.returncode != 0:
+        print(f"[-] booter.py failed with exit code {booter_result.returncode}.")
+        sys.exit(1)
 
     # [2] Scanner
     ip_list = []
@@ -32,26 +37,37 @@ def main():
         cmd = docker_cmd("inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + container_name)
         result = run_cmd(cmd)
 
-        if len(result) > 0:
+        if len(result) > 0 and result[0]:
             ip_list.append(result[0])
     print("[*] Number of containers successfully launched :", len(ip_list))
 
 
     if len(ip_list) > 0:
         print("[*] Run scanner.py")
-        subprocess.run(["python3", "scanner.py", "--requests-only", "-i"] + ["http://" + ip for ip in ip_list])
+        scanner_result = subprocess.run(
+            ["python3", "scanner.py", "--requests-only", "-i"] + ["http://" + ip for ip in ip_list]
+        )
+        if scanner_result.returncode != 0:
+            print(f"[-] scanner.py failed with exit code {scanner_result.returncode}.")
+            sys.exit(1)
         #subprocess.run(["python3", "scanner.py", "-i"] + ["https://" + ip for ip in ip_list])
     else:
         print("[-] booter.py failed.")
-        sys.exit(0)
+        sys.exit(1)
 
     # [3] Learner
     print("[*] Run learner.py")
-    subprocess.run(["python3", "learner.py"])
+    learner_result = subprocess.run(["python3", "learner.py"])
+    if learner_result.returncode != 0:
+        print(f"[-] learner.py failed with exit code {learner_result.returncode}.")
+        sys.exit(1)
  
     # [4] Manager
     print("[*] Run manager.py")
-    subprocess.run(["python3", "manager.py", "--create"])
+    manager_result = subprocess.run(["python3", "manager.py", "--create", "--yes"])
+    if manager_result.returncode != 0:
+        print(f"[-] manager.py failed with exit code {manager_result.returncode}.")
+        sys.exit(1)
 
     print("[*] Finish!")
 
@@ -74,7 +90,7 @@ if __name__ == '__main__':
     firmware_path = args.firmware
     if not os.path.exists(firmware_path):
         print("[-] The path to the firmware image is incorrect.")
-        sys.exit(0)
+        sys.exit(1)
 
     # Number of containers to run
     container_num = args.containers

@@ -347,8 +347,389 @@ tools/
    $ python3 analyzer.py ./honeypot_instance/logs/access.log
 
 ================================================================================
-                            NOTES
+                    HOW TO RUN THE FIRMPOT PROJECT
 ================================================================================
+
+QUICK START - SINGLE COMMAND (RECOMMENDED)
+───────────────────────────────────────────
+
+Run the complete pipeline with verification:
+
+    $ python3 verify_and_run.py <firmware_path>
+
+Example:
+    $ python3 verify_and_run.py ./openwrt-25.12.2-x86-generic-squashfs-combined.img.gz
+
+What it does:
+    ✓ Validates firmware file exists
+    ✓ Runs full FirmPot pipeline (auto.py)
+    ✓ Verifies honeypot_instance/ created
+    ✓ Checks RL learning is active
+    ✓ Validates logs are generated
+    ✓ Prints clear SUCCESS/FAILURE summary
+
+Output:
+    - Colored output (green=pass, red=fail)
+    - Runtime tracking for each step
+    - Final system readiness report
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+DETAILED COMMAND REFERENCE
+───────────────────────────
+
+SETUP & INITIALIZATION
+──────────────────────
+
+1. Install dependencies:
+    $ ./setup.sh
+    (Requires sudo password)
+
+2. Activate Python virtual environment:
+    $ source venv/bin/activate
+
+3. Create logs directory:
+    $ mkdir -p logs
+
+
+AUTOMATIC MODE (SINGLE COMMAND)
+────────────────────────────────
+
+Option A: Using verify_and_run.py (with verification)
+    $ python3 verify_and_run.py <firmware_path>
+    
+    Recommended for: Final testing, production runs, confident deployments
+
+Option B: Using auto.py (direct pipeline)
+    $ python3 auto.py <firmware_path>
+    
+    Recommended for: Development, iterative testing
+
+Example:
+    $ python3 auto.py ./openwrt-firmware.bin
+    
+Expected output:
+    - Runs booter.py → scanner.py → learner.py → manager.py
+    - Creates ./honeypot_instance/ directory
+    - Takes 1-2+ hours depending on firmware complexity
+
+
+MANUAL STEP-BY-STEP MODE
+─────────────────────────
+
+STEP 1: Boot Embedded Application
+    $ python3 booter.py <firmware_path> [options]
+    
+    Options:
+        -c <count>    : Create multiple containers
+        --keep        : Keep container running
+    
+    Example:
+        $ python3 booter.py ./firmware.bin
+        $ python3 booter.py ./firmware.bin -c 3
+    
+    Output: Docker container running with extracted app
+    Note: May require sudo password
+
+
+STEP 2: Scan Web Application
+    $ python3 scanner.py -i <container_ip> [options]
+    
+    Required arguments:
+        -i <IP>       : Target container IP address
+    
+    Options:
+        --port <port> : Target port (default: 80)
+        --threads <n> : Number of threads (default: 4)
+    
+    Example:
+        $ python3 scanner.py -i 172.17.0.2
+        $ python3 scanner.py -i 192.168.1.100 --port 8080 --threads 8
+    
+    Output: response.db with captured HTTP traffic
+
+
+STEP 3: Train Machine Learning Models
+    $ python3 learner.py [options]
+    
+    Options:
+        --gpu         : Enable GPU acceleration
+        --epochs <n>  : Training epochs (default: 50)
+        --batch <n>   : Batch size (default: 32)
+    
+    Example:
+        $ python3 learner.py
+        $ python3 learner.py --gpu --epochs 100
+    
+    Output: checkpoints/ directory with trained models
+
+
+STEP 4: Create Honeypot Instance
+    $ python3 manager.py --create [options]
+    
+    Options:
+        --create      : Create honeypot_instance/
+        --upload <srv>: Upload to remote server (optional)
+    
+    Example:
+        $ python3 manager.py --create
+        $ python3 manager.py --create --upload user@remote.server.com:/path/
+    
+    Output: ./honeypot_instance/ ready for deployment
+
+
+STEP 5: Deploy & Run Honeypot
+    $ cd honeypot_instance/
+    $ python3 honeypot.py [options]
+    
+    Options:
+        -m            : Monitor mode (recommended)
+        -p <port>     : Listen port (default: 80)
+        --log <path>  : Log file path
+    
+    Example:
+        $ cd honeypot_instance/
+        $ python3 honeypot.py -m
+        $ python3 honeypot.py -p 8080
+    
+    Output: Honeypot server listening for connections
+    Note: Press Ctrl+C to stop
+
+
+ANALYSIS & VISUALIZATION
+─────────────────────────
+
+Analyze honeypot logs:
+    $ python3 analyzer.py <log_file_path> [options]
+    
+    Example:
+        $ python3 analyzer.py ./honeypot_instance/logs/access.log
+        $ python3 analyzer.py ./logs/honeypot.log
+    
+    Output: Interactive Dash dashboard at http://127.0.0.1:8050
+
+
+OTHER UTILITIES
+────────────────
+
+Run all components in sequence:
+    $ python3 run_all.py <firmware_path>
+    
+    Runs the complete pipeline:
+        1. auto.py (full pipeline)
+        2. honeypot.py server
+        3. Verification checks
+    
+    Example:
+        $ python3 run_all.py ./firmware.bin
+
+
+Quick test/demo:
+    $ python3 DEMO_GUIDE.py
+    
+    Runs interactive FirmPot demo
+
+
+Check database entries:
+    $ python3 utils/check_db.py
+    
+    Shows statistics from response.db
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+COMMAND EXECUTION FLOW DIAGRAM
+──────────────────────────────
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                     FULL PIPELINE (Auto Mode)                      │
+└─────────────────────────────────────────────────────────────────────┘
+
+    verify_and_run.py <firmware>
+              │
+              ├─→ run_all.py <firmware>
+              │        │
+              │        ├─→ auto.py <firmware>
+              │        │        │
+              │        │        ├─→ booter.py
+              │        │        ├─→ scanner.py
+              │        │        ├─→ learner.py
+              │        │        └─→ manager.py --create
+              │        │
+              │        └─→ honeypot.py (server mode)
+              │
+              └─→ STEP 3-6: Verification
+                   • Verify outputs
+                   • Check RL learning
+                   • Validate honeypot behavior
+                   • Print summary
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                   MANUAL PIPELINE (Step-by-Step)                   │
+└─────────────────────────────────────────────────────────────────────┘
+
+    python3 booter.py <firmware>
+              ↓
+    python3 scanner.py -i <container_ip>
+              ↓
+    python3 learner.py
+              ↓
+    python3 manager.py --create
+              ↓
+    cd honeypot_instance/
+    python3 honeypot.py -m
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+MONITORING & TROUBLESHOOTING
+────────────────────────────
+
+Monitor running processes:
+    $ ps aux | grep -E "python|honeypot|auto"
+
+Check honeypot_instance creation:
+    $ ls -la honeypot_instance/
+
+View real-time logs:
+    $ tail -f run_all.log
+    $ tail -f honeypot_instance/logs/access.log
+
+Check if ports are listening:
+    $ netstat -tuln | grep LISTEN
+
+Check Docker containers:
+    $ docker ps -a
+    $ docker logs <container_id>
+
+Stop running honeypot:
+    $ pkill -f honeypot.py
+
+Clean up Docker:
+    $ docker stop $(docker ps -q)
+    $ docker rm $(docker ps -aq)
+
+Check database:
+    $ sqlite3 response.db "SELECT COUNT(*) FROM records;"
+
+Verify firmware accessibility:
+    $ file <firmware_path>
+    $ ls -lh <firmware_path>
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+COMMON COMMAND SEQUENCES
+────────────────────────
+
+Sequence 1: Quick Verification Run
+    $ python3 verify_and_run.py ./firmware.bin
+
+
+Sequence 2: Full Interactive Testing
+    $ python3 auto.py ./firmware.bin
+    $ cd honeypot_instance/
+    $ python3 honeypot.py -m
+    $ # Open new terminal
+    $ curl http://127.0.0.1:80
+
+
+Sequence 3: Development with Logging
+    $ python3 booter.py ./firmware.bin
+    $ python3 scanner.py -i 172.17.0.2
+    $ tail -f run_all.log
+    $ python3 learner.py
+    $ python3 manager.py --create
+    $ cd honeypot_instance/
+    $ python3 honeypot.py -m
+
+
+Sequence 4: Demo & Analysis
+    $ python3 DEMO_GUIDE.py
+    $ python3 analyzer.py ./honeypot_instance/logs/access.log
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+EXPECTED FILES & DIRECTORIES CREATED
+──────────────────────────────────────
+
+After running auto.py or verify_and_run.py:
+
+    ./honeypot_instance/           ← Main honeypot package
+    ├── honeypot.py                ← Honeypot server
+    ├── rl_agent.py                ← RL response engine
+    ├── response.db                ← Learned responses
+    ├── word2vec.bin               ← Word2Vec model
+    ├── checkpoints/               ← RNN model checkpoints
+    ├── logs/
+    │   ├── access.log             ← Honeypot access log
+    │   └── honeypot.log           ← Server logs
+    └── [supporting utilities]
+
+    ./checkpoints/                 ← Training checkpoints
+    ├── encoder.ckpt
+    ├── decoder.ckpt
+    └── metadata.json
+
+    ./logs/                        ← General logs
+    └── *.log files
+
+    ./run_all.log                  ← Pipeline execution log
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PERFORMANCE TIPS
+────────────────
+
+For faster execution:
+    • Use verify_and_run.py for automated runs
+    • Enable GPU: python3 learner.py --gpu
+    • Increase threads: python3 scanner.py -i <IP> --threads 16
+    • Use SSD for better I/O
+
+For production deployment:
+    • Run verify_and_run.py before deployment
+    • Use manager.py --upload to copy to remote server
+    • Monitor honeypot.py with process manager (systemd, supervisor)
+    • Enable log rotation for access.log
+
+For debugging:
+    • Check run_all.log for detailed pipeline logs
+    • Use tail -f to monitor logs in real-time
+    • Check Docker container logs
+    • Verify firewall rules allow traffic
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+TYPICAL EXECUTION TIME
+──────────────────────
+
+Component           | Time (approx)
+────────────────────┼────────────────
+booter.py           | 5-15 minutes
+scanner.py          | 10-30 minutes
+learner.py          | 20-60 minutes
+manager.py --create | 1-5 minutes
+honeypot startup    | 30 seconds
+────────────────────┼────────────────
+TOTAL (auto mode)   | 1-2+ hours
+
+Times vary based on:
+    • Firmware complexity
+    • Available CPU/GPU
+    • Network conditions
+    • Database size
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+NOTES
+─────
 
 - GPU support available for faster ML training (uses TensorFlow)
 - Multi-container support with -c flag in booter.py
@@ -357,6 +738,8 @@ tools/
 - Firmware must be OpenWrt-based for compatibility
 - Models are saved in checkpoints/ directory
 - Default honeypot instance location: ./honeypot_instance/
+- verify_and_run.py is the RECOMMENDED entry point for full deployment
+- All commands should be run from the FirmPot root directory
 
 ================================================================================
                           END OF WORKFLOW

@@ -22,6 +22,8 @@ import argparse
 import subprocess
 import time
 import json
+import shutil
+import urllib.request
 from datetime import datetime
 
 
@@ -36,11 +38,13 @@ class HoneypotRunner:
             firmware_path: Path to firmware image
             verbose: Print detailed logs
         """
+        self.root_dir = os.getcwd()
         self.firmware_path = firmware_path
         self.verbose = verbose
-        self.honeypot_instance_dir = "./honeypot_instance"
-        self.log_file = "run_all.log"
+        self.honeypot_instance_dir = os.path.join(self.root_dir, "honeypot_instance")
+        self.log_file = os.path.join(self.root_dir, "run_all.log")
         self.start_time = datetime.now()
+        self.dashboard_port = 5000
 
     def log(self, message: str, level: str = "INFO", is_error: bool = False):
         """Print and log message"""
@@ -84,26 +88,26 @@ class HoneypotRunner:
         """Run auto.py to generate honeypot"""
         self.step(1, "Generate Honeypot from Firmware (auto.py)")
 
+        self.stop_existing_background_services()
+
         if os.path.exists(self.honeypot_instance_dir):
             self.log(
                 f"Honeypot instance directory already exists, removing...",
                 "WARNING",
             )
-            subprocess.run(["rm", "-rf", self.honeypot_instance_dir])
+            shutil.rmtree(self.honeypot_instance_dir)
 
         cmd = ["python3", "auto.py", self.firmware_path]
         self.log(f"Executing: {' '.join(cmd)}", "INFO")
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+            result = subprocess.run(cmd, timeout=3600, cwd=self.root_dir)
 
             if result.returncode == 0:
                 self.log("✓ auto.py completed successfully", "SUCCESS")
                 return True
             else:
                 self.log(f"✗ auto.py failed with code {result.returncode}", "ERROR")
-                self.log(f"STDOUT:\n{result.stdout}", "ERROR")
-                self.log(f"STDERR:\n{result.stderr}", "ERROR")
                 return False
         except subprocess.TimeoutExpired:
             self.log("✗ auto.py timeout (1 hour exceeded)", "ERROR", True)
@@ -111,6 +115,20 @@ class HoneypotRunner:
         except Exception as e:
             self.log(f"✗ auto.py error: {e}", "ERROR", True)
             return False
+
+    def stop_existing_background_services(self):
+        """Stop previous background honeypot/dashboard processes if PID files exist."""
+        for pid_filename in ["honeypot.pid", "dashboard.pid"]:
+            pid_path = os.path.join(self.honeypot_instance_dir, pid_filename)
+            if not os.path.exists(pid_path):
+                continue
+            try:
+                with open(pid_path, "r") as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, 15)
+                self.log(f"Stopped previous background process from {pid_filename} (PID {pid})", "INFO")
+            except Exception:
+                pass
 
     def verify_honeypot_instance(self) -> bool:
         """Verify honeypot_instance/ was created correctly"""
@@ -134,7 +152,6 @@ class HoneypotRunner:
             "honeypot.py",
             "rl_agent.py",
             "response.db",
-            "word2vec.bin",
         ]
 
         for filename in required_files:
@@ -147,6 +164,16 @@ class HoneypotRunner:
                 return False
 
         # Check checkpoints directory
+        word2vec_path = os.path.join(self.honeypot_instance_dir, "word2vec.bin")
+        if os.path.exists(word2vec_path):
+            size_mb = os.path.getsize(word2vec_path) / (1024 * 1024)
+            self.log(f"  ✓ word2vec.bin ({size_mb:.2f} MB)", "SUCCESS")
+        else:
+            self.log(
+                "  ! word2vec.bin not found; honeypot will run without Magnitude mode",
+                "WARNING",
+            )
+
         checkpoints_dir = os.path.join(self.honeypot_instance_dir, "checkpoints")
         if os.path.isdir(checkpoints_dir):
             checkpoint_files = os.listdir(checkpoints_dir)
@@ -155,36 +182,87 @@ class HoneypotRunner:
                 "SUCCESS",
             )
         else:
-            self.log("  ✗ checkpoints/ directory MISSING", "ERROR")
-            return False
+            self.log(
+                "  ! checkpoints/ directory missing; honeypot will start with fallback weights",
+                "WARNING",
+            )
 
         self.log(
             "\n✓ All required files present. Honeypot instance ready.", "SUCCESS"
         )
         return True
 
-    def start_honeypot_server(self) -> bool:
+    def start_honeypot_server(
+        self,
+        background: bool = False,
+        startup_wait: int = 5,
+    ) -> bool:
         """Start honeypot server"""
         self.step(3, "Start Honeypot Server")
 
-        os.chdir(self.honeypot_instance_dir)
-        self.log(f"Changed directory to: {os.getcwd()}", "INFO")
-
-        cmd = ["python3", "honeypot.py", "-m"]
+        cmd = ["python3", "honeypot.py"]
+        if os.path.exists(os.path.join(self.honeypot_instance_dir, "word2vec.bin")):
+            cmd.append("-m")
         self.log(f"Executing: {' '.join(cmd)}", "INFO")
-        self.log("Server starting... Press Ctrl+C to stop.", "INFO")
+        self.log(f"Honeypot directory: {self.honeypot_instance_dir}", "INFO")
 
         try:
-            result = subprocess.run(cmd)
+            if background:
+                stdout_log = os.path.join(
+                    self.honeypot_instance_dir, "logs", "honeypot_stdout.log"
+                )
+                os.makedirs(os.path.dirname(stdout_log), exist_ok=True)
+
+                self.log(
+                    f"Server starting in background; waiting {startup_wait}s for startup checks.",
+                    "INFO",
+                )
+                with open(stdout_log, "a") as stdout_handle:
+                    process = subprocess.Popen(
+                        cmd,
+                        cwd=self.honeypot_instance_dir,
+                        stdout=stdout_handle,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        text=True,
+                    )
+
+                time.sleep(startup_wait)
+                returncode = process.poll()
+                if returncode is None:
+                    pid_file = os.path.join(self.honeypot_instance_dir, "honeypot.pid")
+                    with open(pid_file, "w") as f:
+                        f.write(f"{process.pid}\n")
+
+                    self.log(
+                        f"✓ Honeypot server is running in background (PID {process.pid})",
+                        "SUCCESS",
+                    )
+                    self.log(f"Stdout/stderr log: {stdout_log}", "INFO")
+                    self.log(
+                        "Use `kill $(cat honeypot_instance/honeypot.pid)` to stop it later.",
+                        "INFO",
+                    )
+                    return True
+
+                self.log(
+                    f"✗ Honeypot server exited during startup with code {returncode}",
+                    "ERROR",
+                )
+                self.log(f"Check server output: {stdout_log}", "ERROR")
+                return False
+
+            self.log("Server starting... Press Ctrl+C to stop.", "INFO")
+            result = subprocess.run(cmd, cwd=self.honeypot_instance_dir)
             if result.returncode == 0:
                 self.log("✓ Honeypot server stopped gracefully", "SUCCESS")
                 return True
-            else:
-                self.log(
-                    f"✗ Honeypot server exited with code {result.returncode}",
-                    "ERROR",
-                )
-                return False
+
+            self.log(
+                f"✗ Honeypot server exited with code {result.returncode}",
+                "ERROR",
+            )
+            return False
         except KeyboardInterrupt:
             self.log(
                 "\n✓ Honeypot server stopped by user (Ctrl+C)", "SUCCESS"
@@ -192,6 +270,65 @@ class HoneypotRunner:
             return True
         except Exception as e:
             self.log(f"✗ Error starting server: {e}", "ERROR")
+            return False
+
+    def start_dashboard(self, startup_wait: int = 5) -> bool:
+        """Start analytics dashboard for the honeypot instance."""
+        self.step(4, "Start Analytics Dashboard")
+
+        cmd = [
+            "python3",
+            os.path.join(self.root_dir, "analyzer.py"),
+            "--log-dir",
+            os.path.join(self.honeypot_instance_dir, "logs"),
+            "--honeypot-dir",
+            self.honeypot_instance_dir,
+            "--port",
+            str(self.dashboard_port),
+        ]
+        stdout_log = os.path.join(self.honeypot_instance_dir, "logs", "dashboard_stdout.log")
+        os.makedirs(os.path.dirname(stdout_log), exist_ok=True)
+
+        with open(stdout_log, "a") as stdout_handle:
+            process = subprocess.Popen(
+                cmd,
+                cwd=self.root_dir,
+                stdout=stdout_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                text=True,
+            )
+
+        time.sleep(startup_wait)
+        if process.poll() is not None:
+            self.log(
+                f"✗ Dashboard exited during startup with code {process.returncode}",
+                "ERROR",
+            )
+            self.log(f"Check dashboard output: {stdout_log}", "ERROR")
+            return False
+
+        if not self._http_ok(f"http://127.0.0.1:{self.dashboard_port}/dashboard"):
+            self.log("✗ Dashboard did not respond after startup", "ERROR")
+            self.log(f"Check dashboard output: {stdout_log}", "ERROR")
+            return False
+
+        pid_file = os.path.join(self.honeypot_instance_dir, "dashboard.pid")
+        with open(pid_file, "w") as f:
+            f.write(f"{process.pid}\n")
+
+        self.log(
+            f"✓ Dashboard is running in background (PID {process.pid})",
+            "SUCCESS",
+        )
+        self.log(f"Dashboard: http://localhost:{self.dashboard_port}/dashboard", "INFO")
+        return True
+
+    def _http_ok(self, url: str) -> bool:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as response:
+                return 200 <= response.status < 500
+        except Exception:
             return False
 
     def print_summary(self):
@@ -240,7 +377,7 @@ class HoneypotRunner:
         except Exception as e:
             self.log(f"Could not verify RL learning: {e}", "WARNING")
 
-    def run(self) -> bool:
+    def run(self, background_server: bool = False, startup_wait: int = 5) -> bool:
         """Execute full pipeline"""
         self.log("FirmPot End-to-End Runner Started", "SUCCESS")
         self.log(f"Start Time: {self.start_time}", "INFO")
@@ -258,11 +395,17 @@ class HoneypotRunner:
             return False
 
         # Step 4: Start server
-        os.chdir("..")  # Go back to FirmPot root
-        if not self.start_honeypot_server():
+        if not self.start_honeypot_server(
+            background=background_server,
+            startup_wait=startup_wait,
+        ):
             return False
 
-        # Step 5: Summary and RL check
+        # Step 5: Start analytics dashboard
+        if not self.start_dashboard(startup_wait=3 if background_server else 5):
+            return False
+
+        # Step 6: Summary and RL check
         self.print_summary()
         # Note: RL verification would happen after server runs
         # For now, just suggest where to find it
@@ -281,7 +424,24 @@ def main():
         "-v",
         "--verbose",
         action="store_true",
-        help="Print verbose output",
+        help="Print verbose output (enabled by default)",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress non-error console logs",
+    )
+    parser.add_argument(
+        "--background-server",
+        action="store_true",
+        help="Start honeypot in the background and return after startup checks",
+    )
+    parser.add_argument(
+        "--server-startup-wait",
+        type=int,
+        default=5,
+        help="Seconds to wait before considering background startup successful",
     )
 
     args = parser.parse_args()
@@ -289,8 +449,17 @@ def main():
     # Ensure logs directory exists
     os.makedirs("logs", exist_ok=True)
 
-    runner = HoneypotRunner(args.firmware, verbose=args.verbose)
-    success = runner.run()
+    verbose = True
+    if args.quiet:
+        verbose = False
+    elif args.verbose:
+        verbose = True
+
+    runner = HoneypotRunner(args.firmware, verbose=verbose)
+    success = runner.run(
+        background_server=args.background_server,
+        startup_wait=args.server_startup_wait,
+    )
 
     sys.exit(0 if success else 1)
 

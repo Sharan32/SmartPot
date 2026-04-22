@@ -12,6 +12,8 @@ import os
 import sys
 sys.dont_write_bytecode = True
 import argparse
+import json
+import time
 
 import traceback
 import threading
@@ -27,6 +29,7 @@ from gensim.models import KeyedVectors
 import logging
 import logging.handlers
 import warnings
+import shutil
 
 import select
 import urllib.parse
@@ -39,6 +42,10 @@ from utils.model import Encoder, Decoder
 from utils.params import common_paths, train_params, hardware_info
 from utils.http_headers import check_req_header, get_shaped_header
 from rl_agent import RLAgent
+from detection import AttackDetector
+from logger import StructuredLogger
+from metrics import get_metrics
+from session_manager import SessionManager
 
 
 #------------------------------------------------
@@ -70,7 +77,7 @@ JST = timezone(timedelta(hours=+9), 'JST')
 
 # Server
 ip = "0.0.0.0"
-port = 80
+port = 8080
 
 honeypot_ip = socket.gethostbyname(socket.gethostname())
 
@@ -96,7 +103,11 @@ def get_model(word2vec_path=None):
                                     encoder=encoder,
                                     decoder=decoder)
     # Load checkpoint
-    checkpoint.restore(tf.train.latest_checkpoint(train_params['checkpoints']))
+    latest_checkpoint = tf.train.latest_checkpoint(train_params['checkpoints'])
+    if latest_checkpoint:
+        checkpoint.restore(latest_checkpoint)
+    else:
+        print("[!] No checkpoints found. Starting with fallback model weights.")
 
 
     if word2vec_path is None:
@@ -228,6 +239,30 @@ def logging_system(message, is_error, is_exit):
 def get_time():
     return "{0:%Y-%m-%d %H:%M:%S%z}".format(datetime.now(JST))
 
+
+def get_default_response():
+    """Return a minimal safe HTTP response when the response DB has no usable rows."""
+    headers = "Content-Type: text/html; charset=utf-8@@@Connection: close"
+    body = b"<html><body><h1>FirmPot</h1><p>Fallback response active.</p></body></html>"
+    return 200, headers, body
+
+
+def ensure_runtime_modules():
+    """Copy support modules into the generated instance if they are missing."""
+    required_files = [
+        "detection.py",
+        "logger.py",
+        "metrics.py",
+        "session_manager.py",
+    ]
+    for filename in required_files:
+        if os.path.exists(filename):
+            continue
+        source = os.path.join("..", filename)
+        if os.path.exists(source):
+            shutil.copy(source, filename)
+            print(f"[!] Restored missing runtime module from {source}")
+
 #------------------------------------------------
 # Honeypot Server
 #------------------------------------------------
@@ -247,6 +282,60 @@ class HoneypotHTTPServer(HTTPServer):
 #------------------------------------------------
 
 class HoneypotRequestHandler(BaseHTTPRequestHandler):
+
+    def _write_json_response(self, status_code, payload, session=None):
+        body = json.dumps(payload, indent=2, default=str).encode()
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(body))
+        if session is not None:
+            self.send_header("Set-Cookie", session_manager.build_cookie_header(session))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+            self.wfile.flush()
+
+    def _handle_builtin_endpoint(self, req_path, req_method, session):
+        if req_method not in {"GET", "HEAD"}:
+            return False
+
+        if req_path == "/health":
+            self._write_json_response(
+                200,
+                {
+                    "status": "healthy",
+                    "service": "FirmPot",
+                    "port": port,
+                    "uptime_seconds": round(time.time() - server_start_time, 3),
+                },
+                session=session,
+            )
+            return True
+
+        if req_path == "/ready":
+            self._write_json_response(
+                200,
+                {
+                    "ready": True,
+                    "checks": {
+                        "response_db": os.path.exists(db),
+                        "word2vec_loaded": is_magnitude,
+                        "mapping_loaded": len(mapping) > 0,
+                    },
+                },
+                session=session,
+            )
+            return True
+
+        if req_path == "/metrics":
+            snapshot = metrics_tracker.get_metrics_snapshot()
+            snapshot["session_stats"] = session_manager.get_stats()
+            snapshot["detector_stats"] = attack_detector.get_stats()
+            snapshot["log_stats"] = structured_logger.get_log_stats()
+            self._write_json_response(200, snapshot, session=session)
+            return True
+
+        return False
     
     def send_response(self, code, message=None):
         self.log_request(code)
@@ -259,6 +348,7 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
         # Client IP addr and Port
         clientip = self.client_address[0]
         clientport = self.client_address[1]
+        request_start = time.time()
 
         try:
             (r, w, e) = select.select([self.rfile], [], [], timeout)
@@ -339,6 +429,45 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
                 if check_req_header(k):
                     request_list.append(get_shaped_header(k,v.replace(honeypot_ip, '')).replace(" ", "#"))
             req_headers = req_headers[:-3]
+            user_agent = self.headers.get("User-Agent", "")
+            session = session_manager.get_session(clientip, dict(self.headers))
+
+            if self._handle_builtin_endpoint(req_path, req_method, session):
+                metrics_tracker.record_request(
+                    attack_tags=["normal"],
+                    status_code=200,
+                    response_time=time.time() - request_start,
+                    client_ip=clientip,
+                    path=req_path,
+                    method=req_method,
+                )
+                structured_logger.log_event(
+                    {
+                        "src_ip": clientip,
+                        "method": req_method,
+                        "path": req_path,
+                        "query": req_query if req_query != "<EMP>" else "",
+                        "body": req_body if req_body != "<EMP>" else "",
+                        "headers": dict(self.headers),
+                        "status": 200,
+                        "attack_tags": ["normal"],
+                        "confidence": 1.0,
+                        "rl_action_id": -1,
+                        "profile": session.get("profile"),
+                        "session_id": session.get("id"),
+                    }
+                )
+                return
+
+            attack_info = attack_detector.detect(
+                method=req_method,
+                path=req_path,
+                query=req_query if req_query != "<EMP>" else "",
+                body=req_body if req_body != "<EMP>" else "",
+                headers=dict(self.headers),
+                client_ip=clientip,
+                user_agent=user_agent,
+            )
  
             # Add <END>
             request_list.append("<END>")
@@ -350,7 +479,12 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
             #------------------------------------
 
             k = 3
-            context = (req_path, req_method)
+            context = rl_agent.build_state(
+                req_method,
+                req_path,
+                attack_info["tags"],
+                session.get("request_count", 0),
+            )
 
             try:
                 if is_magnitude:
@@ -381,11 +515,15 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
 
             try:
                 c.execute('select res_status, res_headers, res_body from response_table where res_id = ?', (res_id,))
-                response_list = c.fetchall()[0]
-            except IndexError:
-                # Fallback to res_id 0 or 1
+                response_list = c.fetchone()
+            except Exception:
+                response_list = None
+
+            if response_list is None:
                 c.execute('select res_status, res_headers, res_body from response_table where res_id = 1')
-                response_list = c.fetchall()[0]
+                response_list = c.fetchone()
+            if response_list is None:
+                response_list = get_default_response()
     
             res_status = response_list[0]
             res_headers = response_list[1]
@@ -393,6 +531,7 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
     
             # Response status            
             self.send_response(res_status)
+            self.send_header("Set-Cookie", session_manager.build_cookie_header(session))
 
             # Response body
             if res_body == "<EMP>":
@@ -436,10 +575,71 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
 
             # Update RL reward
             try:
-                rl_agent.update_reward(context, res_id, 1)
+                reward = 1.0 if "normal" not in attack_info["tags"] else 0.2
+                rl_agent.update_reward(context, res_id, reward)
+                metrics_tracker.record_rl_action(
+                    context,
+                    res_id,
+                    reward,
+                    rl_agent.get_q_value(context, res_id),
+                )
+                structured_logger.log_rl_decision(
+                    context,
+                    res_id,
+                    reward,
+                    rl_agent.get_q_value(context, res_id),
+                )
             except Exception as e:
                 logging_system(f"RL update failed: {e}", True, False)
-            
+
+            response_time = time.time() - request_start
+            metrics_tracker.record_request(
+                attack_tags=attack_info["tags"],
+                status_code=res_status,
+                response_time=response_time,
+                client_ip=clientip,
+                path=req_path,
+                method=req_method,
+                rl_action=res_id,
+            )
+            metrics_tracker.record_session(session["id"])
+
+            session_manager.update_session(
+                session,
+                {"method": req_method, "path": req_path},
+                attack_info,
+                {"status": res_status, "rl_action": res_id},
+            )
+            session_snapshot = session_manager.get_session_metrics(session["id"])
+            structured_logger.log_event(
+                {
+                    "src_ip": clientip,
+                    "method": req_method,
+                    "path": req_path,
+                    "query": req_query if req_query != "<EMP>" else "",
+                    "body": req_body if req_body != "<EMP>" else "",
+                    "headers": dict(self.headers),
+                    "status": res_status,
+                    "attack_tags": attack_info["tags"],
+                    "confidence": attack_info["confidence"],
+                    "rl_action_id": res_id,
+                    "profile": session.get("profile"),
+                    "session_id": session.get("id"),
+                    "session_duration_seconds": session_snapshot.get("duration_seconds", 0),
+                    "session_request_count": session_snapshot.get("request_count", 0),
+                    "response_time_ms": round(response_time * 1000, 2),
+                }
+            )
+
+            if "normal" not in attack_info["tags"]:
+                logging_system(
+                    "Attack detected from {0}: tags={1} path={2}".format(
+                        clientip, ",".join(attack_info["tags"]), req_path
+                    ),
+                    False,
+                    False,
+                )
+
             # Logging
             logging_access("{n}[{time}]{s}{clientip}{n}{method}{s}{path}{s}{query}{s}{body}{n}{headers}{n}{status_code}{s}{selected}{s}{candidates}{n}".format(
                                                                     time=get_time(),
@@ -478,24 +678,23 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
 
 
 def main():
-
-    # Honeypot Instanse
-    myServer = HoneypotHTTPServer((ip, port), HoneypotRequestHandler)
-    myServer.timeout = timeout
-
-    # Logging
-    logger = logging.getLogger('SyslogLogger')
-    logger.setLevel(logging.INFO)
-    logging_system("Honeypot Start. {0}:{1} at {2}".format(ip, port, get_time()), False, False)
-
-    # Start Honeypot Server
     try:
+        myServer = HoneypotHTTPServer((ip, port), HoneypotRequestHandler)
+        myServer.timeout = timeout
+
+        logger = logging.getLogger('SyslogLogger')
+        logger.setLevel(logging.INFO)
+        logging_system("Honeypot Start. {0}:{1} at {2}".format(ip, port, get_time()), False, False)
         myServer.serve_forever()
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        logging_system(f"Server startup failed: {e}", True, True)
 
-    # Server close
-    myServer.server_close()
+    try:
+        myServer.server_close()
+    except Exception:
+        pass
 
 #------------------------------------------------
 # if __name__ == '__main__'
@@ -506,10 +705,11 @@ if __name__ == '__main__':
     # Define Arguments
     parser = argparse.ArgumentParser(description='Honeypot program')
     parser.add_argument('-m', '--magnitude', action='store_true', help='Use the Magnitude Mechanism to Respond.')
-    parser.add_argument('-p', '--port', type=int, default=int(os.getenv('FIRMPOT_PORT', '80')), help='Port to bind honeypot server (default: 80).')
+    parser.add_argument('-p', '--port', type=int, default=int(os.getenv('FIRMPOT_PORT', '8080')), help='Port to bind honeypot server (default: 8080).')
     args = parser.parse_args()
 
     port = args.port
+    ensure_runtime_modules()
     
     # Logfile paths
     if not os.path.exists(common_paths["logs"]):
@@ -524,16 +724,21 @@ if __name__ == '__main__':
 
     # Mapping dictionary
     mapping = {}
-    c.execute('select * from mapping_table')
-    for m in c.fetchall():
-        mapping[m[1]] = m[0]
+    try:
+        c.execute('select * from mapping_table')
+        for m in c.fetchall():
+            mapping[m[1]] = m[0]
+    except sqlite3.OperationalError:
+        mapping = {"<PAD>": 0, "<END>": 1, "<EMP>": 2}
 
     # Get the max value of response_id
     c.execute('select max(res_id) from response_table')
     max_id = c.fetchall()[0][0]
 
     # Set the max index
-    if len(mapping) > max_id:
+    if max_id is None:
+        train_params["max_index"] = max(len(mapping), 3)
+    elif len(mapping) > max_id:
         train_params["max_index"] = len(mapping)
     else:
         train_params["max_index"] = max_id + 1
@@ -544,16 +749,17 @@ if __name__ == '__main__':
         word2vec_path = common_paths["word2vec"]
         if not os.path.exists(word2vec_path):
             print("[-] The word2vec path specified in the argument does not exist.")
-            sys.exit(0)
+            sys.exit(1)
         moov, encoder, decoder = get_model(word2vec_path)
     else:
         encoder, decoder = get_model()
 
     # RL Agent
     rl_agent = RLAgent()
+    attack_detector = AttackDetector()
+    structured_logger = StructuredLogger(common_paths["logs"], "access_structured.json", "access_structured.log")
+    metrics_tracker = get_metrics()
+    session_manager = SessionManager()
+    server_start_time = time.time()
 
     main()
-
-
-
-

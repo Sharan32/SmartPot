@@ -23,6 +23,7 @@ support_services = [
     "dropbear",
     "telnet"
 ]
+auto_yes = False
 
 # The linux filesystem to find
 basic_linuxfs = [
@@ -131,23 +132,27 @@ def create_startup(dir_path, startup_path):
 
     if len(service_list) == 0:
         print("[-] Could not find any %s services." % service)
-        sys.exit(0)
+        sys.exit(1)
     elif len(service_list) == 1:
         launch_service = service_list[0]
         print("[*] One service found :", launch_service)
     else:
         print("[!] Some services found :", service_list)
-        while True:
-            print("[?] Which service do you want to start? Please enter a number.")
-            print(" / ".join([str(i) + " : " + s for i, s in enumerate(service_list)]))
-            choice = input('Enter number: ')
-            choice = int(choice)
-            if choice in [i for i in range(len(service_list))]:
-                launch_service = service_list[choice]
-                break
-            else:
-                print("[-] The number you entered is incorrect.")
-        print("[*] Launch :", launch_service)
+        if auto_yes:
+            launch_service = service_list[0]
+            print("[*] Auto-selected service :", launch_service)
+        else:
+            while True:
+                print("[?] Which service do you want to start? Please enter a number.")
+                print(" / ".join([str(i) + " : " + s for i, s in enumerate(service_list)]))
+                choice = input('Enter number: ')
+                choice = int(choice)
+                if choice in [i for i in range(len(service_list))]:
+                    launch_service = service_list[choice]
+                    break
+                else:
+                    print("[-] The number you entered is incorrect.")
+            print("[*] Launch :", launch_service)
 
     with open(startup_path, 'w') as f:
         f.writelines("#!/bin/sh\n")
@@ -168,16 +173,22 @@ def run_containers(container_num, docker_config):
     """Run as many containers as the number of <container_num> according to the setting of <docker_config>."""
 
     for i in range(container_num):
+        container_name = docker_config["container_name"] + str(i)
+        network_name = docker_config["network_name"] + str(i)
+
+        # Clean up leftovers from previous runs so the pipeline can be re-run safely.
+        run_cmd(docker_cmd('rm -f ' + container_name + ' >/dev/null 2>&1'))
+        run_cmd(docker_cmd('network rm ' + network_name + ' >/dev/null 2>&1'))
 
         # Create a docker network
         subnet = docker_config["ip_1st_octet"] + "." + str(int(docker_config["ip_2nd_octet"])+i) + "." + docker_config["ip_3rd_octet"] + "." + docker_config["ip_4th_octet"] + docker_config["subnet_mask"]
-        cmd = docker_cmd('network create --driver=bridge --subnet=' + subnet + ' ' + docker_config["network_name"] + str(i)
+        cmd = docker_cmd('network create --driver=bridge --subnet=' + subnet + ' ' + network_name
 )
         run_cmd(cmd)
 
         # Create a docker container
         cmd = docker_cmd(
-            'run -itd --privileged --net=' + docker_config["network_name"] + str(i) + ' --name=' + docker_config["container_name"] + str(i) + " " + docker_config["image_name"]
+            'run -itd --privileged --net=' + network_name + ' --name=' + container_name + " " + docker_config["image_name"]
         )
         print("[*] Run :", cmd)
         run_cmd(cmd)
@@ -190,7 +201,7 @@ def run_containers(container_num, docker_config):
         cmd = docker_cmd("inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + container_name)
         result = run_cmd(cmd)
 
-        if len(result) > 0:
+        if len(result) > 0 and result[0]:
             success_list.append(container_name)
             ip_list.append(result[0])
         else:
@@ -223,9 +234,10 @@ def main():
     
     # [1] Extract Filesystem
     if not os.path.exists(dir_path):
-        extracted_path = "/".join(firmware_path.split("/")[:-1]) + "/_" + firmware_path.split('/')[-1] + ".extracted/"
-        if extracted_path.startswith("/"):
-            extracted_path = "." + extracted_path
+        extracted_path = os.path.join(
+            os.path.dirname(os.path.abspath(firmware_path)),
+            "_" + os.path.basename(firmware_path) + ".extracted",
+        ) + "/"
 
         if os.path.exists(extracted_path):
             print("[!] Do not run binwalk because the extracted results are already there.")
@@ -250,7 +262,7 @@ def main():
             
         if len(linuxfs) == 0:
             print("[-] Failed to extract a filesystem.")
-            sys.exit(0)
+            sys.exit(1)
         else:
             print("[*] Success to extract :", linuxfs)
             run_cmd("cp -r " + check_dir + " " + dir_path)
@@ -260,7 +272,7 @@ def main():
         print("[*] The extracted filesystem is OpenWrt-based.")
     else:
         print("[-] The extracted filesystem is not OpenWrt-based.")
-        sys.exit(0)
+        sys.exit(1)
       
     # [3] Check architecture
     arch = run_cmd("file " + dir_path + "/bin/busybox | awk '{print $6}'")
@@ -305,6 +317,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--startup', default=boot_params["startup"], help="Specify the path of the new startup script to be created, or the name of the startup script that exists, if any (default: '%s')."%boot_params["startup"])
     parser.add_argument('-c', '--containers', default=1, type=int, help="Specify the number of containers to be launched, or 0 if you don't want to launch any (default: 1).")
     parser.add_argument('-m', '--matryoshka', action='store_true', help="Use binwalk's recursive filesystem search feature (not used by default).")
+    parser.add_argument('-y', '--yes', action='store_true', help="Automatically answer yes to overwrite/reuse prompts.")
     parser.add_argument('--service', default="http", help="Specify the service you want to start from [http, ssh, telnet] (default is '%s')." % support_services[0])
     args = parser.parse_args() 
 
@@ -314,30 +327,32 @@ if __name__ == '__main__':
     firmware_path = args.firmware
     if not os.path.exists(firmware_path):
         print("[-] The path to the firmware image is incorrect.")
-        sys.exit(0)
+        sys.exit(1)
 
     # Path to filesystem extracted from the firmware image
     dir_path = args.filesystem
+    assume_yes = args.yes
+    auto_yes = args.yes
     if os.path.exists(dir_path):
         if len(os.listdir(dir_path))!= 0:
             print("[!] There are already files in %s." % dir_path)
             print("[?] Do you want to stop extracting the firmware and use %s?" % dir_path)
-            if yes_no_input():
+            if assume_yes or yes_no_input():
                 print("[*] Use %s to boot." % dir_path)
             else:
                 print("[-] Empty the directory or delete the directory, and try again.")
-                sys.exit(0)
+                sys.exit(1)
 
     # Path to startup script
     startup_path = args.startup
     if os.path.exists(startup_path):
         print("[!] The %s already exists." % startup_path)
         print("[?] Do you want to use %s to boot the firmware?" % startup_path)
-        if yes_no_input():
+        if assume_yes or yes_no_input():
             print("[*] Use %s to boot." % startup_path)
         else:
             print("[-] Delete %s or move it to another location, and try again." % startup_path)
-            sys.exit(0)
+            sys.exit(1)
 
     # Number of containers to run
     container_num = args.containers
@@ -345,9 +360,9 @@ if __name__ == '__main__':
     if os.path.exists("./Dockerfile"):
         print("[!] There are already ./Dockerfile")
         print("[?] Can this file be overwritten?")
-        if not yes_no_input():
+        if not (assume_yes or yes_no_input()):
             print("[-] Delete ./Dockerfile or move it to another location, and try again.")
-            sys.exit(0)
+            sys.exit(1)
 
     # Flag of binwalk
     is_matryoshka = args.matryoshka
@@ -357,6 +372,6 @@ if __name__ == '__main__':
     if service not in support_services:
         print("[-] The specified string is wrong.")
         print("[-] Please specify the service from :", support_services)
-        sys.exit(0)
+        sys.exit(1)
 
     main()

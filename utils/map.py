@@ -31,7 +31,8 @@ class Mapping():
         self.reverse_mapping = {v : k for k, v in self.mapping.items()}
 
         c.execute('select max(res_id) from learning_table')
-        self.mapping_size = c.fetchall()[0][0] + 1
+        max_res_id = c.fetchall()[0][0]
+        self.mapping_size = (max_res_id + 1) if max_res_id is not None else len(self.mapping)
 
         if self.mapping_size < len(self.mapping):
             self.mapping_size = len(self.mapping)
@@ -98,5 +99,4 @@ class Mapping():
             characters.append(self.reverse_mapping[i])
 
         return characters
-
 

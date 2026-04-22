@@ -1,0 +1,17 @@
+/etc/uci-defaults/50_luci-mod-admin-full
+/usr/libexec/luci-peeraddr
+/usr/share/luci/menu.d/luci-mod-network.json
+/usr/share/rpcd/acl.d/luci-mod-network.json
+/usr/share/ucitrack/luci-mod-network-dnsmasq.json
+/usr/share/ucitrack/luci-mod-network-interfaces.json
+/usr/share/ucitrack/luci-mod-network-odhcpd.json
+/usr/share/ucitrack/luci-mod-network-wireless.json
+/www/luci-static/resources/tools/dnsrecordhandlers.js
+/www/luci-static/resources/tools/network.js
+/www/luci-static/resources/view/network/dhcp.js
+/www/luci-static/resources/view/network/diagnostics.js
+/www/luci-static/resources/view/network/dns.js
+/www/luci-static/resources/view/network/interfaces.js
+/www/luci-static/resources/view/network/routes.js
+/www/luci-static/resources/view/network/switch.js
+/www/luci-static/resources/view/network/wireless.js

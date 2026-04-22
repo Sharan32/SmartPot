@@ -1,0 +1,2363 @@
+#!/usr/bin/ucode -S
+// owut - OpenWrt Upgrade Tool
+// Copyright (c) 2024-2026 Eric Fahlgren <eric.fahlgren@gmail.com>
+// SPDX-License-Identifier: GPL-2.0-only
+// vim: set noexpandtab softtabstop=8 shiftwidth=8 syntax=javascript:
+//------------------------------------------------------------------------------
+
+let NAME    = "owut";
+let VERSION = "2026.01.13~2526d84b-r1";
+let PROG    = `${NAME}/${VERSION}`;
+
+import * as uloop    from "uloop";
+import * as uclient  from "uclient";
+import * as fs       from "fs";
+import * as mod_ubus from "ubus";
+import * as ap       from "utils.argparse";
+import { cursor }    from "uci";
+let uci = cursor();
+
+const default_sysupgrade = "https://sysupgrade.openwrt.org";
+const default_upstream   = "https://downloads.openwrt.org";
+
+const issue_url = "https://github.com/efahl/owut/issues";
+const forum_url = "https://forum.openwrt.org/t/owut-openwrt-upgrade-tool/200035";
+const wiki_url  = "https://openwrt.org/docs/guide-user/installation/sysupgrade.owut";
+
+//------------------------------------------------------------------------------
+
+const EXIT_OK = 0, EXIT_ERR = 1;
+
+const Logger = {
+	_levels: [],
+	_level: 0,
+	set_level: function(lvl) { this._level = lvl; },
+	show: function(lvl) { return this._level >= lvl; },
+	push: function(new) { push(this._levels, this._level); this._level = new; },
+	pop: function() { this._level = pop(this._levels); },
+
+	stdout_is_pipe: ! fs.stdout.isatty(),
+
+	GREEN:  "0;255;0",
+	YELLOW: "255;234;0",
+	RED:    "255;0;0",
+	reset:  "reset",
+
+	clreol: function()
+	{
+		// Clear to end-of-line when appropriate.
+		return this.stdout_is_pipe ? "" : "\033[K";
+	},
+
+	color: function(color_name)
+	{
+		// Suppress colorization when stdout is a pipe.
+		if (this.stdout_is_pipe)
+			return "";
+		return color_name == this.reset ? "\033[m" : `\033[38;2;${color_name}m`;
+	},
+
+	colorize: function(color_name, text)
+	{
+		if (this.stdout_is_pipe)
+			return text;
+		return this.color(color_name) + text + this.color(this.reset);
+	},
+
+	_n_lines: 0,
+	mark:   function() { this._n_lines = 0; },
+	backup: function() {
+		// Reposition cursor up n lines and reset line counter.
+		if (! this.stdout_is_pipe && this._n_lines > 0) {
+			printf("\033[%dA\r", this._n_lines);
+			fs.stdout.flush();
+		}
+		this.mark();
+	},
+
+	_fmt: function(fmt, ...args)
+	{
+		let s = sprintf(fmt, ...args);
+		this._n_lines += length(match(s, /\n/g));
+		return this.clreol() + s;
+	},
+
+	_out: function(prefix, clr, fmt, ...args)
+	{
+		warn(sprintf("%s: ", this.colorize(clr, prefix)), this._fmt(fmt, ...args));
+	},
+
+	err: function(fmt, ...args) { this._out("ERROR",   this.RED,    fmt, ...args); },
+	wrn: function(fmt, ...args) { this._out("WARNING", this.YELLOW, fmt, ...args); },
+
+	log: function(level, fmt, ...args)
+	{
+		if (this.show(level)) {
+			print(this._fmt(fmt, ...args));
+			fs.stdout.flush();
+		}
+	},
+
+	die: function(fmt, ...args) {
+		this.err(fmt, ...args);
+		exit(EXIT_ERR);
+	},
+	bug: function(fmt, ...args) {
+		// Variant for errors indicating code issue, not a user error.
+		this.err(fmt, ...args);
+		assert(false,
+		   `This is a bug in '${PROG}', please report at\n`
+		   `  ${issue_url}\n`);
+	},
+};
+
+let L = Logger;
+
+//------------------------------------------------------------------------------
+
+let commands = {
+	check:    { help: "Collect all resources and report stats." },
+	list:     { help: "Show all the packages installed by user." },
+	blob:     { help: "Display the json blob for the ASU build request." },
+	download: { help: "Build, download and verify an image." },
+	verify:   { help: "Verify the downloaded image." },
+	install:  { help: "Install the specified local image." },
+	upgrade:  { help: "Build, download, verify and install an image." },
+
+	versions: { help: "Show available versions." },
+	dump:     { help: "Collect all resources and dump internal data structures." },
+};
+
+let _fstypes   = ["squashfs", "ext4", "ubifs", "jffs2"];
+let _fslo      = 1;  // See https://sysupgrade.openwrt.org/redoc#operation/api_v1_build_post_api_v1_build_post
+let _list_fmts = ["fs-user", "fs-all", "config"];
+
+function parse_rev_code(version_code)
+{
+	return match(version_code, /^r(\d+)-([[:xdigit:]]+)$/i);
+}
+
+// Add a custom validator for the '--rev-code' option value.
+ap.ArgActions["rc"] = function(self, params) {
+	let rc = params.value;
+	if (rc && rc != "none" && ! parse_rev_code(rc)) {
+		this.usage_short(self, {
+			exit: 1,
+			prefix: `ERROR: invalid version code format '${params.value}'`
+		});
+	}
+	this.store(self, params);
+};
+
+let arg_defs = proto([
+	ap.DEFAULT_HELP,
+	ap.DEFAULT_VERSION,
+	{ name: "command",       position: 0, one_of: commands,           action: "store",                               help: "Sub-command to execute" },
+	{ name: "version_to",    short: "-V", long: "--version-to",       action: "store",     nargs: 1, default: null,  help: "Specify the target version, defaults to installed version." },
+	{ name: "rev_code",      short: "-R", long: "--rev-code",         action: "rc",        nargs: 1, default: null,  help: "Specify a 'version_code', literal 'none' allowed, defaults to latest build." },
+	{ name: "verbosity",     short: "-v", long: "--verbose",          action: "inc",                 default: 0,     help: "Print various diagnostics.  Repeat for even more output." },
+	{ name: "verbosity",     short: "-q", long: "--quiet",            action: "dec",                 default: 0,     help: "Reduce verbosity.  Repeat for total silence."},
+	{ name: "keep",          short: "-k", long: "--keep",             action: "set",                 default: false, help: "Save all downloaded working files." },
+	{ name: "force",                      long: "--force",            action: "set",                 default: false, help: "Force a build even when there are downgrades or no changes." },
+	{ name: "add",           short: "-a", long: "--add",              action: "storex",    nargs: 1,                 help: "New packages to add to build list." },
+	{ name: "remove",        short: "-r", long: "--remove",           action: "storex",    nargs: 1,                 help: "Installed packages to remove from build list." },
+	{ name: "clean_slate",                long: "--clean-slate",      action: "set",                 default: false, help: "Remove all but default packages (READ THE DOCS)." },
+	{ name: "ignored_defaults",           long: "--ignored-defaults", action: "storex",    nargs: 1,                 help: "List of explicitly ignored default package names." },
+	{ name: "ignored_changes",            long: "--ignored-changes",  action: "storex",    nargs: 1,                 help: "List of explicitly ignored package changes." },
+	{ name: "init_script",   short: "-I", long: "--init-script",      action: "store",     nargs: 1, default: null,  help: "Path to uci-defaults script to run on first boot ('-' use stdin)." },
+	{ name: "fstype",        short: "-F", long: "--fstype",           action: "enum",      nargs: 1, default: null, one_of: _fstypes, help: `Desired root file system type (${join(", ", _fstypes)}).` },
+	{ name: "rootfs_size",   short: "-S", long: "--rootfs-size",      action: "store_int", nargs: 1, default: null, lower: _fslo, help: `DANGER: See wiki before using!  Root file system size in MB (${_fslo}-[server-dependent]).` },
+	{ name: "image",         short: "-i", long: "--image",            action: "file",      nargs: 1, default: "/tmp/firmware.bin", help: "Image name for download, verify, install and upgrade." },
+	{ name: "format",        short: "-f", long: "--format",           action: "enum",      nargs: 1, default: null, one_of: _list_fmts, help: `Format for 'list' output (${join(", ", _list_fmts)}).` },
+	{ name: "pre_install",   short: "-p", long: "--pre-install",      action: "store",     nargs: 1, default: null,  help: "Script to exec just prior to launching final sysupgrade." },
+	{ name: "poll_interval", short: "-T", long: "--poll-interval",    action: "store_int", nargs: 1, default: 2000,  help: "Poll interval for build monitor, in milliseconds." },
+	{ name: "progress_size",              long: "--progress-size",    action: "store_int", nargs: 1, default:    0,  help: "Response content-length above which we report download progress." },
+
+	{ name: "device",                     long: "--device",           action: "store",     nargs: 1, default: null  }, // Undocumented: For testing foreign devices.
+], ap.ArgParser);
+
+arg_defs.set_prog_info(`owut - OpenWrt Upgrade Tool ${VERSION} (${sourcepath()})`);
+arg_defs.set_bookends(
+	"\nowut is an upgrade tool for OpenWrt.\n",
+	`\nFull documentation\n`
+	`  ${wiki_url}\n\n`
+	`Questions and discussion\n`
+	`  ${forum_url}\n\n`
+	`Issues and bug reports\n`
+        `  ${issue_url}\n\n`
+);
+
+let options = arg_defs.parse(null, {attendedsysupgrade: "owut"});
+
+L.set_level(options.verbosity);
+
+//------------------------------------------------------------------------------
+
+let url;      // See initialize_urls
+let build;    // See collect_all for next three
+let device;
+let release;
+let server_limits;
+
+// Temporary and resource files.
+// We save them all with reasonably recognizable names to aid in debugging.
+let tmp_root = "/tmp/owut-";
+let img_root = match(options.image, /(.*\/|)[^\.]*/)[0];
+let tmp = {
+	overview_json:      `${tmp_root}overview.json`,
+	pkg_arch_json:      `${tmp_root}packages-arch.json`,
+	pkg_platform_json:  `${tmp_root}packages-plat.json`,
+	platform_json:      `${tmp_root}platform.json`,
+
+	failed_html:        `${tmp_root}failures`,
+
+	req_json:           `${tmp_root}build-request.json`,   // The POST body we send.
+	build_json:         `${tmp_root}build-response.json`,  // First response.
+	build_status_json:  `${tmp_root}build-status.json`,    // Overwritten subsequent responses.
+	rsp_header:         `${tmp_root}rsp-header.txt`,
+
+	firmware_sums:      `${img_root}.sha256sums`,          // Expected sha256sums from downloaded firmware.
+	firmware_man:       `${img_root}-manifest.json`,       // Manifest of successful build.
+};
+
+let packageDB = {};      // Dictionary of installed packages and much status.
+let pkg_name_len = 0;
+
+let packages = {  // Dictionary of package lists.
+	// Remove selected packages per
+	//   https://github.com/openwrt/openwrt/commit/451e2ce0
+	//   https://github.com/openwrt/openwrt/commit/999ef827
+	non_upgradable: [ "kernel", "libgcc", "libc"],
+
+	// Collected from this device.
+	installed: {}, // All the name:version pairs.
+	top_level: [], // Simple list of names.
+
+	// Collected from upgrade servers based on to-version.
+	default:   [], // Another simple name list.
+	available: {}, // The name:version pairs that are available for installation.
+	changes:   {}, // Changes extracted from overview; structure documented in apply_pkg_mods.
+
+	// Logging of modifications
+	replaced:  {}, // Log of replacements and removals due to 'package_changes'.
+};
+
+//------------------------------------------------------------------------------
+
+const ubus = {
+	init: function() {
+		this._bus = mod_ubus.connect();
+		this.check(this._bus, "mod_ubus.connect");
+	},
+	term: function() { this._bus.disconnect(); },
+
+	check: function(result, fmt, ...args) {
+		if (!result || mod_ubus.error())
+			L.bug("ubus: %s\n"+fmt+"\n", mod_ubus.error(), ...args);
+	},
+
+	call: function(obj, func, args) {
+		let result = this._bus.call(obj, func, args);
+		this.check(result, " from: 'ubus call %s %s %s'", obj, func, args ?? "");
+		return result;
+	},
+
+	raw_run: function(command, ...params) {
+		// Dangerous: no error checking.
+		return this._bus.call("file", "exec", { command, params });
+	},
+	run: function(command, ...params) {
+		return this.call("file", "exec", { command, params });
+	},
+};
+
+//------------------------------------------------------------------------------
+
+let sha256 = {
+	cmd: [ "/bin/busybox", "sha256sum" ],
+
+	save: function(file, sum) {
+		// Create the checksum file from the image name and expected sum.
+		let sums = fs.open(tmp.firmware_sums, "w");
+		if (sums) {
+			sums.write(sprintf("%s  %s\n", sum, file));
+			sums.close();
+		}
+	},
+
+	saved_sum: function(file) {
+		// Our saved sums is always just a single line
+		let sums = fs.open(tmp.firmware_sums, "r");
+		if (sums) {
+			let line = split(trim(sums.read("line")), /\s+/);
+			sums.close();
+			if (line[1] == file)
+				return line[0];
+			L.err("Invalid image: got '%s', but expected '%s' in sum file\n", line[1], file);
+		}
+		return null;
+	},
+
+	sum: function(file) {
+		// Return the checksum for the specified file.
+		let data = ubus.run(...this.cmd, file);
+		if (data?.code == 0)
+			return substr(data.stdout, 0, 64);
+		this._fatal("sum", data);
+	},
+
+	verify: function() {
+		// Run validation against the saved checksums.
+		let data = ubus.run(...this.cmd, "-c", tmp.firmware_sums);
+		if (! data) this._fatal("verify", data);
+		return data;
+	},
+
+	_fatal: function(where, data) {
+		L.bug("Fatal error in sha256.%s:\n%.2J\n", where, data);
+	},
+};
+
+//------------------------------------------------------------------------------
+
+function sysupgrade(file, check, options)
+{
+	// When sysupgrade performs the upgrade, it returns with shell status
+	// of '10', so uc_ubus_call raises an error.  '--test' is fine, it
+	// returns proper status.
+
+	return check
+		? ubus.run("sysupgrade", ...options, file)
+		: ubus.raw_run("sysupgrade", ...(options ?? []), file);
+}
+
+//------------------------------------------------------------------------------
+
+let dl_stats = {
+	count: 0,  // Number of files downloaded.
+	time:  0,  // Sum of wall time taken.
+	bytes: 0,  // Only includes content, not http headers.
+
+	Mbits: (bytes) => (bytes * 8.0 / (1024*1024)),
+	log: function(url, file, bytes, time) {
+		this.bytes += bytes;
+		this.time  += time;
+		this.count++;
+
+		let Mbits = this.Mbits(bytes);
+		L.log(2, "Downloaded %s to %s (%dB at %.3f Mbps)\n", url, file, bytes, Mbits/time);
+	},
+
+	report: function() {
+		if (this.count > 0) {
+			let Mbps = this.Mbits(this.bytes) / this.time;
+			L.log(2, "Downloaded %d files, %d bytes at %.3f Mbps\n", this.count, this.bytes, Mbps);
+		}
+	},
+};
+
+function _get_ca_files()
+{
+	const cert_path = "/etc/ssl/certs";
+	try {
+		return fs.glob(`${cert_path}/*.crt`);
+	}
+	catch (error) {
+		L.wrn("Could not access SSL certificates: %s\n", error);
+		return [];
+	}
+}
+
+let _uc_uc = null;
+let _uc_cb = null;
+
+function _get_uclient(url, dst_file)
+{
+	if (! _uc_uc) {
+		_uc_cb = {
+			url:         "",    // For error messages.
+			dst_file:    "",    // Where to put result.
+			output:      null,  // Handle for dst_file.
+			rsp_headers: {},
+
+			_disconnect: (cb) => {
+				if (cb.output) {
+					cb.output.close();
+					cb.output = null;
+				}
+				this.disconnect();
+				uloop.end();
+			},
+
+			header_done: (cb) => {
+				cb.output = fs.open(cb.dst_file, "w");
+				if (! cb.output) {
+					L.err("opening %s: %s\n", cb.dst_file, fs.error());
+					cb._disconnect(cb);
+				}
+				cb.rsp_headers = this.get_headers();
+				cb.rsp_headers.status = this.status().status;
+				cb.rsp_headers.content_length = int(cb.rsp_headers["content-length"] || 0);
+				cb.rsp_headers.content_read = 0;
+			},
+
+			data_read: (cb) => {
+				// uc.read returns null on eof.
+				let n_read = 0;
+				while ((n_read = cb.output.write(this.read() ?? "")) > 0) {
+					cb.rsp_headers.content_read += n_read;
+					if (options.progress_size && cb.rsp_headers.content_length > options.progress_size) {
+						let pct_read = 100.0 * cb.rsp_headers.content_read / cb.rsp_headers.content_length;
+						L.log(0, "Download progress: %5.1f%% %8d/%d bytes" + (L.stdout_is_pipe ? "\n" : "\r"),
+							pct_read, cb.rsp_headers.content_read, cb.rsp_headers.content_length);
+					}
+				}
+			},
+
+			data_eof: (cb) => {
+				cb._disconnect(cb);
+			},
+
+			error: (cb, code) => {
+				L.err("uclient error code=%s\n  This could be due to the server being down or inaccessible, check\n  %s\n", code, cb.url);
+				cb._disconnect(cb);
+			},
+		};
+
+		_uc_uc = uclient.new(url, null, _uc_cb);
+
+		if (! _uc_uc.ssl_init({ca_files: _get_ca_files()})) {
+			L.die("owut uses ucode-mod-uclient, which requires an SSL library to function:\n" +
+			"  Please install one of the libustream-*[ssl|tls] packages as well as\n" +
+			"  one of the ca-bundle or ca-certificates packages.\n");
+		}
+
+	}
+
+	_uc_uc.set_url(url);
+	_uc_cb.url      = url;
+	_uc_cb.dst_file = dst_file;
+
+	return _uc_uc;
+}
+
+function _del_uclient()
+{
+	_uc_uc?.free();
+	_uc_uc = null;
+	_uc_cb = null;
+	gc();
+}
+
+function _request(url, dst_file, params)
+{
+	//  uclient function for simple http requests
+	//   url       = self explanatory
+	//   dst_file  = result of request
+	//   params    = dictionary of optional parameters:
+	//     'type'      = 'GET' (default), 'HEAD' or 'POST'
+	//     'json_data' =  json data, forces 'POST' implicitly
+
+	let json_data = params?.json_data;
+	let type      = params?.type ?? "GET";
+
+	if (! (type in ["GET", "HEAD", "POST"])) {
+		L.bug("Invalid request type '%s'\n", type);
+	}
+
+	let start = time();
+	let uc = _get_uclient(url, dst_file);
+
+	if (! uc.connect()) {
+		L.err("Failed to connect\n");
+		return null;
+	}
+
+	let headers = {
+		"User-Agent": PROG,
+	};
+	let args = {
+		headers: headers,
+	};
+
+	if (json_data) {
+		type = "POST";
+		headers["Content-Type"] = "application/json";
+		args["post_data"] = json_data;
+	}
+
+	if (! uc.request(type, args)) {
+		L.err("Failed to send request\n");
+		return null;
+	}
+
+	uloop.run();
+
+	if (_uc_cb.rsp_headers) {
+		let elapsed = (time() - start) || 0.5;
+		let bytes = fs.stat(dst_file).size;
+		dl_stats.log(url, dst_file, bytes, elapsed);
+
+		L.log(3, "Response headers = %.2J\n", _uc_cb.rsp_headers);
+
+		if (options.keep) {
+			let hdrs = fs.open(tmp.rsp_header, "w");
+			hdrs.write(sprintf("%.J\n", _uc_cb.rsp_headers));
+			hdrs.close();
+		}
+	}
+
+	return { ...uc.status(), type: type, headers: _uc_cb.rsp_headers };
+}
+
+function read_tmp_file(file)
+{
+	// Reads 'file', then optionally deletes it.
+	// Return raw text.
+
+	let fd = fs.open(file, "r");
+	let tx = fd.read("all");
+	fd.close();
+	if (! options.keep) {
+		fs.unlink(file);
+	}
+	return tx;
+}
+
+function read_tmp_json(file)
+{
+	// Read 'file' into a json object, then optionally delete the file.
+	// Primarily used to parse downloads from /tmp.
+	let txt = trim(read_tmp_file(file));
+	try {
+		return json(txt);
+	}
+	catch (error) {
+		L.err("Expected json, but '%s'\n", error);
+		return txt;
+	}
+}
+
+//------------------------------------------------------------------------------
+//-- Source-specific downloaders -----------------------------------------------
+
+function dl_json(url, json_file, keep_going)
+{
+	let rsp = _request(url, json_file);
+	if (rsp?.status == 200) {
+		return read_tmp_json(json_file);
+	}
+	L.err("Response status %s while downloading\n  %s\n", rsp?.status, url);
+	return keep_going ? null : exit(EXIT_ERR);
+}
+
+function dl_platform()
+{
+	// Get the starting point for the target build.
+	return dl_json(url.platform, tmp.platform_json, true);
+}
+
+function dl_overview()
+{
+	// Overview is the collection of information about the branches and their releases.
+	//
+	// Note that auc uses branches.json instead.  Its content is all included
+	// in overview.json at '$.branches', but we like overview as it has a few
+	// more useful items.  It can be found at:
+	//   url.api_root/branches.json
+
+	return dl_json(url.overview, tmp.overview_json);
+}
+
+function dl_failures(feed)
+{
+	// The build failures info is html that resides in odd, one-man-out URL
+	// locations:
+	//   https://downloads.openwrt.org/snapshots/faillogs/mipsel_24kc/<feed>/
+	//   https://downloads.openwrt.org/releases/faillogs-23.05/mipsel_24kc/<feed>/
+
+	let uri = feed ? `${url.failed}${feed}/` : url.failed;
+	let htm = `${tmp.failed_html}-${feed ? feed : "feeds"}.html`;
+
+	let rsp = _request(uri, htm);
+	if (rsp?.status == 200) {
+		return read_tmp_file(htm);
+	}
+	return null;  // Expected result when no failures found.
+}
+
+function dl_package_versions()
+{
+	// Download and consolidate the two sources of package versions into
+	// a single object.
+
+	let arch = dl_json(url.pkg_arch, tmp.pkg_arch_json, true);
+	let plat = dl_json(url.pkg_plat, tmp.pkg_platform_json, true);
+	return sort({ ...(arch ?? []), ...(plat?.packages ?? []) });
+}
+
+function check_build_response(response, file)
+{
+	// Check the build responses for errors and substitute appropriate
+	// messages when the request has failed.
+	if (! response) {
+		return {
+			status: -1,
+			detail: "Error: unknown server error",
+		};
+	}
+	if (! (response.status in [200, 202])) {
+		let txt = trim(read_tmp_file(file));
+		try {
+			response = json(txt);
+		}
+		catch {
+			response.detail = "Error: " + txt;
+		}
+		return response;
+	}
+	return null;
+}
+
+function dl_build(config)
+{
+	// Start a build by POSTing the json build configuration.
+	let rsp = _request(url.build, tmp.build_json, {json_data: config});
+	return check_build_response(rsp, tmp.build_json) || read_tmp_json(tmp.build_json);
+}
+
+let _use_HEAD = true;
+
+function dl_build_status()
+{
+	// The response is considered valid even if status != 200 (usually 202),
+	// as this is the  ongoing status query.  See switch cases in 'download'
+	// function.
+
+	let rsp = _use_HEAD && _request(url.build_status, tmp.build_status_json, {type: "HEAD"});
+	if (rsp?.status == 405) {
+		_use_HEAD = false;
+	}
+	else if (rsp?.status == 202) {
+		// Build a minimal response.
+		let ib_queue  = rsp.headers["x-queue-position"];
+		let ib_status = rsp.headers["x-imagebuilder-status"];
+		return {
+			status:              rsp.status,
+			detail:              ib_status ?? "queued",
+			queue_position:      ib_queue,
+			imagebuilder_status: ib_status,
+		};
+	}
+
+	// Otherwise do a full GET.
+	rsp = _request(url.build_status, tmp.build_status_json);
+	return check_build_response(rsp, tmp.build_status_json) || read_tmp_json(tmp.build_status_json);
+}
+
+//------------------------------------------------------------------------------
+
+function to_int(s)
+{
+	// Must be an int or there's a bug in caller.
+	if (! match(s, /^[0-9]+$/)) L.bug("Invalid int '%s'\n", s);
+	return int(s);
+}
+
+function ck_int(s)
+{
+	// If empty, NaN or not fully converted, return null.
+	if (! s) return null;
+	s = ltrim(s, "0") || "0";
+	let n = int(s);
+	return n == s ? n : null;
+}
+
+const standard = regexp("^([0-9.]+)(~([0-9a-f]+)){0,1}(-r([0-9]+)){0,1}$", "i");
+const pre_bits = regexp("^[-a-z.]+",          "i");
+const ver_bits = regexp("^[0-9.]+",           "i");
+const ver_splt = regexp("[^a-z0-9]",          "i");
+const rev_bits = regexp("-[r]{0,1}([0-9]+)$", "i");
+const apk_bits = regexp("^_[a-z]+([0-9]+)$",  "i");
+
+function version_parse(version)
+{
+	// Two forms are parsed incorrectly:
+	//   1) Those with all dashes '-', no hash and no rev.  The final number
+	//      is interpreted as the rev number:
+	//        ct-bugcheck: 2016-07-21
+	//        ver=[2016, 7], hsh=null, rev=21
+	//   2) Those starting with a hash, and the initial digits are decimal:
+	//        open-plc-utils: 1ba7d5a0-6
+	//        ver=[1], hsh="ba7d5a0", rev=6
+	//
+	// #1 is only aesthetic and ends up working fine; #2 was fixed in
+	// the apk version cleanup and only appears in 23.05 and earlier.
+
+	let ver, hsh, rev, extra;
+
+	let parts = match(version, standard);
+	if (parts) {
+		// Standard n.n.n~h-rn sequences with optional hash and rev.
+		ver = map(split(parts[1], ver_splt), to_int);
+		hsh = parts[3];
+		rev = ck_int(parts[5]);
+	}
+	else {
+		// Some odd ones:
+		// luasoap: 2014-08-21-raf1e100281cee4b972df10121e37e51d53367a98
+		// luci-app-advanced-reboot: 1.0.1-11-1
+
+		if (parts = match(version, pre_bits)) {
+			// adb:                android.5.0.2_r1-r3
+			// libinih:            r58-r1
+			// luci-app-dockerman: v0.5.13-20240317-1
+			// luci-mod-status:    git-24.141.29354-5cfe7a7 (23.05)
+			version = substr(version, length(parts[0]));
+		}
+
+		if (rev = match(version, rev_bits)) {
+			// Extract and strip rev number from version, in case
+			// it's one of those with lots of dashes.
+			version = substr(version, 0, -length(rev[0]));
+			rev     = to_int(rev[1]);
+		}
+
+		if (ver = match(version, ver_bits)) {
+			version = substr(version, length(ver[0]));
+			ver     = map(split(rtrim(ver[0], "."), ver_splt), to_int);
+		}
+
+		if (length(ver) == 1 && index(version, "-") == 0) {
+			// pservice: 2017-08-29-r3
+			for (let ns in split(substr(version, 1), /[-.]/)) {
+				let n = ck_int(ns);
+				if (n == null) break;
+				push(ver, n);
+				version = substr(version, length(ns)+1);
+			}
+		}
+
+		if (extra = match(version, apk_bits)) {
+			// For apk underscore-named versions:
+			// openssh-ftp-server 9.9_p1-r3 9.9_p2-r1
+			push(ver, int(extra[1]));
+			version = null;
+		}
+
+		// Anything left over must be the "hash" (if we can call it that).
+		hsh = version || null;
+		if (index(hsh, "-") == 0) hsh = substr(hsh, 1);
+	}
+
+	return { ver, hsh, rev };
+}
+
+function pkg_ver_cmp(old, new, strict)
+{
+	if (old == null) return -2;
+	if (new == null) return  2;
+	let v1 = version_parse(old);
+	let v2 = version_parse(new);
+
+	// Ensure format changes are respected: jansson 2.14-r3 2.14.1-r1
+	let len = max(length(v1.ver), length(v2.ver));
+	while (length(v1.ver) < len) push(v1.ver, 0);
+	while (length(v2.ver) < len) push(v2.ver, 0);
+
+	for (let i, n1 in v1.ver) {
+		let n2 = v2.ver[i];
+		if (n1 < n2) return -1;
+		if (n1 > n2) return  1;
+	}
+	if (v1.rev < v2.rev) return -1;
+	if (v1.rev > v2.rev) return  1;
+	// Ignore the hashes unless we're being strict
+	if (strict && v1.hsh != v2.hsh) return 99; // 99 means "I don't know"
+	return 0;
+}
+
+function _vmangle(v)
+{
+	v = replace(v, "-SNAPSHOT", ".999");
+	v = replace(v, "SNAPSHOT",  "999");
+	v = replace(v, "-rc", "-r");
+	if (substr(v, -2) == ".0") v += "-r999"; // After the -rcN
+	return v;
+}
+
+function version_cmp(v1, v2)
+{
+	// Compare two versions and return cmp value based on their relative
+	// ordering.  We want to make sure RCs are before any release, and
+	// SNAPSHOTs are after, hence the string mangling.
+
+	return pkg_ver_cmp(_vmangle(v1), _vmangle(v2));
+}
+
+function version_older(new_version, base_version)
+{
+	// Use version_cmp to see if new_version < base_version.  Useful to detect
+	// if the user is attempting to downgrade their installation.
+	//
+	//   version_older('23.05.2', 'SNAPSHOT') -> true
+	//   version_older('23.05-SNAPSHOT', 'SNAPSHOT') -> true
+	//   version_older('23.05.0', '23.05.0-rc1') -> false
+
+	return version_cmp(new_version, base_version) < 0;
+}
+
+function branch_of(version)
+{
+	// Extract and return the branch for a given version.
+	//   SNAPSHOT       -> SNAPSHOT
+	//   23.05.0-rc1    -> 23.05
+	//   23.05.3        -> 23.05
+	//   23.05-SNAPSHOT -> 23.05
+	if (version == "SNAPSHOT") return "SNAPSHOT";
+	let m = match(version, /\d+\.\d+/);
+	return m ? m[0] : "";
+}
+
+//------------------------------------------------------------------------------
+//-- Package management --------------------------------------------------------
+
+function is_installed(pkg)
+{
+	return pkg in packageDB;
+}
+
+function is_default(pkg)
+{
+	// Return status if package is in the defaults for this device, i.e., it
+	// will be present as part of the standard install.
+
+	// Don't attempt to do the following, because we care about things that
+	// may not be installed, e.g., 'dnsmasq' replaced by 'dnsmasq-full'.
+	//   return pkg in packageDB && packageDB[pkg].default;
+
+	return pkg in packages.default;
+}
+
+function is_top_level(pkg)
+{
+	// We only check in the installed packages.
+	return is_installed(pkg) && packageDB[pkg].top_level;
+}
+
+function is_available(pkg)
+{
+	// Search for a given package in the combined platform/arch package list.
+	return pkg in packages.available;
+}
+
+//------------------------------------------------------------------------------
+
+const SrcType = {
+	ALL:          0,
+	USER_ONLY:    1,
+	DEFAULT_ONLY: 2,
+};
+
+function what_provides(pkg)
+{
+	// Attempt to find the package provider, if it exists.  This is a
+	// hacky workaround for https://github.com/efahl/owut/issues/10, see
+	// that issue for current progress towards a proper solution.
+	let result;
+
+	result = ubus.raw_run("opkg", "whatprovides", pkg);
+	if (result) {
+		let m = match(trim(result.stdout), /What provides.*\n *(.*)/);
+		if (m) return m[-1];
+	}
+
+	result = ubus.raw_run("apk", "list", "--installed", "--providers", "--manifest", pkg);
+	if (result && result.stdout) {
+		// <dnsmasq> dnsmasq-full 2.90-r3
+		let m = split(result.stdout, /\s+/);
+		if (m) return m[1];
+	}
+	return null;
+}
+
+function top_level(src_type)
+{
+	// Return only the installed top level packages, i.e., those upon which
+	// no other package depends.  'src_type' specifies how the top-level list
+	// is to be filtered.
+
+	let tl;
+	switch (src_type) {
+		case SrcType.ALL:
+			tl = is_top_level;
+			break;
+
+		case SrcType.DEFAULT_ONLY:
+			tl = (pkg) => is_top_level(pkg) && is_default(pkg);
+			break;
+
+		case SrcType.USER_ONLY:
+			tl = (pkg) => is_top_level(pkg) && ! is_default(pkg);
+			break;
+	}
+	return filter(keys(packageDB), tl);
+}
+
+function with_versions(pkg_list)
+{
+	let versioned = {};
+	for (let pkg in pkg_list) {
+		let ver = packages.available[pkg];
+		if (! ver) {
+			// Hackery because of packages historically missing from the indexes.
+			if (pkg in ["kernel", "libc"]) continue;
+
+			L.wrn("Package '%s' has no available current version\n", pkg);
+		}
+		versioned[pkg] = ver;
+	}
+	return versioned;
+}
+
+function removed_defaults()
+{
+	// Return the list of default packages that have been removed.
+	return filter(packages.default, (p) => ! is_installed(p));
+}
+
+function add_package(pkg, force)
+{
+	// 'force' is used during package_changes processing to ensure that
+	// the replacement is added, irrespective of availability (e.g., a
+	// broken build for the package being added would otherwise fail).
+
+	if (is_installed(pkg)) {
+		packageDB[pkg].top_level = true;
+		return true;
+	}
+
+	if (! force && ! is_available(pkg)) {
+		L.err("Package '%s' is not available on this platform\n", pkg);
+		return false;
+	}
+
+	packageDB[pkg] = {
+		version:     null,
+		new_version: packages.available[pkg],
+		top_level:   true,
+		default:     is_default(pkg),
+	};
+	return true;
+}
+
+function remove_package(pkg, silent)
+{
+	// pkg - the package to remove, if possible.
+
+	if (! is_installed(pkg)) {
+		if (! silent)
+			L.err("Package '%s' is not installed and cannot be removed\n", pkg);
+	}
+	else {
+		if (! is_top_level(pkg)) {
+			if (! silent)
+				L.wrn("Package '%s' is a dependency, removal will have no effect on the build\n", pkg);
+		}
+		else if (is_default(pkg)) {
+			L.wrn("Package '%s' is a default package, removal may have unknown side effects\n", pkg);
+		}
+		delete packageDB[pkg];
+		return true;
+	}
+	return false;
+}
+
+function replace_package(old_pkg, new_pkg)
+{
+	// Do optional replacements.  If 'old_pkg' is not installed, then we
+	// have nothing to do but report success.
+
+	if (is_installed(old_pkg)) {
+		remove_package(old_pkg, true);
+		return add_package(new_pkg, true);
+	}
+	return true;
+}
+
+function clean_slate()
+{
+	for (let pkg in keys(packageDB)) {
+		if (! is_default(pkg)) {
+			delete packageDB[pkg];
+		}
+	}
+	for (let pkg in packages.default) {
+		if (is_available(pkg)) {
+			add_package(pkg);
+		}
+	}
+	return true;
+}
+
+//------------------------------------------------------------------------------
+
+function collect_defaults(board, device)
+{
+	// Use both board json for its defaults, then add the device-specific
+	// defaults to make one big defaults list.
+
+	let defaults = []; // Must filter out any device-specific removals.
+	for (let pkg in board) {
+		if (! ("-"+pkg in device)) {
+			push(defaults, pkg);
+		}
+	}
+	for (let pkg in device) {
+		if (! match(pkg, /^-/)) {
+			push(defaults, pkg);
+		}
+	}
+
+	for (let pkg in packages.non_upgradable) {
+		if (! (pkg in defaults)) push(defaults, pkg);
+	}
+	packages.default = sort(defaults);
+}
+
+function parse_package_list(opt)
+{
+	// Return array and null as-is, parse strings into array of string.
+	// String separators are any of comma, space or newline sequences.
+	// Allows use of either "list" or "option" in config file.
+	if (type(opt) == "string") {
+		opt = split(opt, /[,[:space:]]+/);
+	}
+	return opt;
+}
+
+function apply_pkg_mods()
+{
+	// 1) Handle 'overview.package_changes'.
+	// 2) Generate any clean-slate request.
+	// 3) Apply user-specified removals.
+	// 4) Apply user-specified additions.
+	//
+	// Package names in changes are already in canonical form.
+	// changes = [
+	//   {
+	//     source:    "name-from",  // Required string - name of package in target version
+	//     target:    "name-to",    // Optional string - if present, name of replaced package in installed version
+	//     revision:  123,          // Required int - revision at which package change was introduced
+	//     mandatory: false,        // Optional bool - if true, then force add/remove of target/source, respectively
+	//   },
+	//   ...
+	// ];
+	//
+	// For a case of simple removal, see 'kmod-nft-nat6', which was merged
+	// into 'kmod-nft-nat' in rev 19160.
+
+	let errors = 0;
+
+	// TODO think about downgrades, i.e., when to.rev_num < from.rev_num...
+
+	let ignored = parse_package_list(options.ignored_changes);
+	let rev_num = build.to.rev_num();
+	for (let chg in packages.changes) {
+		// Upgrades
+		if (chg.source in ignored) {
+			// Allow user to retain old packages on demand, but inform them when changes are skipped.
+			L.log(1, "Ignoring package change %s to %s\n", chg.source, chg.target);
+			continue;
+		}
+		if (chg.revision <= rev_num) {
+			if (chg.target) {
+				if (is_installed(chg.source))
+					packages.replaced[chg.source] = chg.target;
+				if (! replace_package(chg.source, chg.target))
+					errors++;
+			}
+			else if (is_installed(chg.source)) {
+				// No target, only source, so remove it.
+				packages.replaced[chg.source] = null;
+				if (! remove_package(chg.source))
+					errors++;
+			}
+		}
+	}
+
+	if (options.clean_slate) {
+		clean_slate();
+	}
+
+	// Do removals first, so any conflicts are suppressed.
+	for (let pkg in parse_package_list(options.remove)) {
+		if (! pkg) continue;
+		if (! remove_package(pkg)) {
+			errors++;
+		}
+	}
+	for (let pkg in parse_package_list(options.add)) {
+		if (! pkg) continue;
+		if (! add_package(pkg)) {
+			errors++;
+		}
+	}
+
+	for (let pkg in ignored) {
+		if (! add_package(pkg)) {
+			errors++;
+		}
+	}
+
+	return errors == 0;
+}
+
+function collect_packages()
+{
+	// Using data from rpc-sys packagelist, build an object containing all
+	// installed package data.
+	//
+	//     packageDB = {
+	//         "pkg1": {
+	//             version:     "version-string",
+	//             new_version: "version-string",
+	//             top_level:   bool,
+	//             default:     bool,
+	//         },
+	//         "pkg2": {
+	//             ...
+	//         },
+	//     };
+
+	let installed = ubus.call("rpc-sys", "packagelist", { all: true });
+	let top_level = ubus.call("rpc-sys", "packagelist", { all: false });
+
+	packages.installed = installed.packages;
+	packages.top_level = sort(keys(top_level.packages));
+
+	packages.available = dl_package_versions() ?? {};  // Might be null in ancient versions.
+
+	for (let pkg, ver in packages.installed) {
+		packageDB[pkg] = {
+			version:     ver,
+			new_version: packages.available[pkg],
+			top_level:   pkg in packages.top_level,
+			default:     is_default(pkg),
+		};
+	}
+
+	if (! apply_pkg_mods()) {
+		L.die("Errors collecting package data, terminating.\n");
+	}
+}
+
+//------------------------------------------------------------------------------
+
+function initialize_urls()
+{
+	let sysupgrade = rtrim(uci.get_first("attendedsysupgrade", "server", "url"), "/") || default_sysupgrade;
+
+	let api        = sysupgrade + "/api/v1";
+	let build      = api + "/build";
+	let status     = build + "/{hash}";
+	let static     = sysupgrade + "/json/v1";
+	let store      = sysupgrade + "/store";
+	let overview   = static + "/overview.json";
+
+	url = {
+		sysupgrade_root: sysupgrade, // sysupgrade server base url
+		api_root:        api,        // api for builds and other dynamic requests
+		build:           build,      // build request
+		build_status:    status,     // build status, same as build appended with hash
+		static_root:     static,     // json static api root url
+		store_root:      store,      // api database directory for build results
+		platform:        null,       // release platform json
+		overview:        overview,   // Top-level overview.json, contains branch info
+		pkg_arch:        null,       // Generic arch package list, containing most of the items
+		pkg_plat:        null,       // Platform packages, built specifically for this platform
+
+		upstream:        null,       // upstream build server base url, from overview.json
+		download:        null,       // upstream with directory at which the "to" build can be found
+		failed:          null,       // Failure list html
+	};
+}
+
+function show_versions(check_version_to)
+{
+	// Using the ASU overview to get all the available versions, scan that
+	// for version-to and report.
+
+	L.log(0, "Available 'version-to' values from %s:\n", url.sysupgrade_root);
+
+	let branches  = release.branches;
+	let installed = build.from.version;
+	let selected  = build.to?.version ?? options.version_to;
+	let found_to  = false;
+
+	for (let branch, details in branches) {
+		L.log(0, "  %s %s branch\n", branch, branch == "SNAPSHOT" ? "main" : "release");
+		for (let version in details.versions) {
+			let suffix = [];
+			if (version == details.latest) push(suffix, "latest");
+			if (version == installed     ) push(suffix, "installed");
+			if (version == selected      ) {
+				push(suffix, "requested");
+				found_to = true;
+			}
+			suffix = length(suffix) == 0 ? "" : " (" + join(",", suffix) + ")";
+			L.log(0, "    %s%s\n", version, suffix);
+		}
+	}
+
+	if (! found_to)
+		L.log(0, "\nYour specified version-to '%s' is not available.  " +
+			 "Pick one from above.\n", selected);
+	else if (check_version_to)
+		L.log(0, "\nYour version-to '%s' appears valid, so either:\n" +
+			 "  1) This build has been removed from the server, or\n" +
+			 "  2) The ASU server is having issues.\n", selected);
+}
+
+//------------------------------------------------------------------------------
+
+const BuildInfo = {
+	is_snapshot: function() {
+		return this.version == "SNAPSHOT";
+	},
+
+	is_rel_snapshot: function() {
+		return match(this.version, /.*-SNAPSHOT/) != null;
+	},
+
+	is_downgrade_from: function(from) {
+		if (version_older(this.version, from.version))
+			return true;
+		// Same or newer version, so check revision number.
+		return this.rev_num() < from.rev_num();
+	},
+
+	rev_num: function() {
+		// Extracts the revision number from the revision code:
+		//     "r23630-842932a63d" -> 23630
+		let m = parse_rev_code(this.rev_code);
+		return m ? int(m[1]) : 0;
+	},
+};
+
+function collect_device_info()
+{
+	let sysb = ubus.call("system", "board");
+
+	let efi_check = null;
+
+	if (options.device) {
+		// Allow test cases (or "cross" downloads?), using '--device'
+		// option.  tegra is one with 'sdcard' sutype, use as follows:
+		//   owut ... --device tegra/generic:compulab_trimslice:squashfs
+		let bv = split(options.device, ":");
+		sysb.release.target = bv[0];
+		sysb.board_name     = bv[1];
+		sysb.rootfs_type    = bv[2] || "squashfs";
+		efi_check           = bv[3] || "no";  // Default to no, if unspecified.
+	}
+
+	let target   = sysb.release.target;
+	let platform = replace(sysb.board_name, /,/, "_");
+	let ver_from = sysb.release.version;
+	let sutype; // Sysupgrade type: combined, combined-efi, sdcard or sysupgrade (or trx or lxl or ???)
+
+	// Generic efi targets are:
+	//   armsr     - EFI-boot only, see https://github.com/efahl/owut/issues/21
+	//   loongarch - EFI-boot only
+	//   x86       - EFI- or BIOS-boot
+	let efi_capable = match(target, /^(armsr|loongarch|x86)\//);
+	if (efi_check == null) {
+		efi_check = efi_capable ? "check" : "no";  // one of: force, no, check
+	}
+
+	// See also, auc.c:1657 'select_image' for changing installed fstype to requested one.
+	// Wait, is there also "factory"??? See asu/build.py abt line 246
+	if (efi_capable) {
+		// No distinction between "factory" and "sysupgrade" for the generic devices.
+		sutype   = "combined";
+	}
+	else {
+		// Could be that sutype = "sdcard" for some devices, but
+		// assume it is "sysupgrade", which might be wrong.  We'll
+		// fix this after we get the profiles for the device, see
+		// 'collect_all'.
+		sutype   = "sysupgrade";
+	}
+
+	if (efi_check == "force" || (efi_check == "check" && fs.access("/sys/firmware/efi"))) {
+		sutype = `${sutype}-efi`;
+	}
+
+	device = {
+		arch:     null,              // "x86_64" or "mipsel_24kc"   or "aarch64_cortex-a53", contained in platform_json
+		target:   target,            // "x86/64" or "ath79/generic" or "mediatek/mt7622", from system board
+		platform: platform,          // "generic" (for x86) or "tplink,archer-c7-v4" or "linksys,e8450-ubi"
+		fstype:   sysb.rootfs_type,  // "ext4" or "squashfs", what is actually present now
+		sutype:   sutype,            // Sysupgrade type, combined, combined-efi or sysupgrade or sdcard
+	};
+
+	build = {
+		from: proto({
+			version:    ver_from,               // Full version name currently installed: "SNAPSHOT" or "22.03.1"
+			rev_code:   sysb.release.revision,  // Kernel version that is currently running
+			kernel:     sysb.kernel,            // Current build on device
+		}, BuildInfo)
+	};
+}
+
+function collect_build_info()
+{
+	let ver_to = options.version_to ? uc(options.version_to) : null;
+	if (ver_to) {
+		if (index(ver_to, "RC") > 0) ver_to = lc(ver_to);
+
+		if (ver_to in release.branches) {
+			// User specified a branch name, not a specific version,
+			// so coerce to latest in that branch.
+			ver_to = release.branches[ver_to].latest;
+		}
+	}
+	else if (index(build.from.version, "SNAPSHOT") >= 0)
+		// Any snapshot stays on the same branch.
+		ver_to = build.from.version;
+	else {
+		// Any unspecified non-snapshot gets latest from same branch.
+		let b = branch_of(build.from.version);
+		ver_to = release.branches[b].latest;
+	}
+
+	let ver_to_branch = branch_of(ver_to);
+	if (! (ver_to_branch in release.branches) ||
+	    ! (ver_to        in release.branches[ver_to_branch].versions)) {
+		show_versions(true);
+		exit(EXIT_ERR);
+	}
+
+	let fstype = options.fstype || device.fstype;
+	build.to = proto({
+		version:    ver_to,  // Full version name of target: "22.03.0-rc4", "23.05.2" or "SNAPSHOT"
+		rev_code:   null,    // Build number from target
+		kernel:     null,    // Kernel version of target build, extracted from BOM
+		fstype:     fstype,  // Requested root FS type
+		img_prefix: null,    // Prefix of image being built
+		img_file:   null,    // Full image name to download and install
+		date:       null,    // Build date of target
+	}, BuildInfo);
+}
+
+function age(from)
+{
+	let delta = time() - from;
+	let hours = (delta+1800) / 3600;
+	if (hours < 48)
+		return sprintf("~%d hours ago", hours);
+	return sprintf("~%.0f days ago", hours / 24.0);
+}
+
+function complete_build_info(profile, board)
+{
+	let dt = gmtime(board.source_date_epoch);
+	build.to.date       = sprintf("%4d-%02d-%02dT%02d:%02d:%02dZ (%s)", dt.year, dt.mon, dt.mday, dt.hour, dt.min, dt.sec, age(board.source_date_epoch));
+	build.to.rev_code   = board.version_code;
+	build.to.img_prefix = profile.image_prefix;
+
+	// First, only allow legitimate "sysupgrade" types through.
+	let images = filter(profile.images, (img) => img.filesystem && img.filesystem != "initramfs" && ! match(img.type, /factory/));
+
+	let valid_fstypes = uniq(sort(map(images, (img) => img.filesystem)));
+	if (! (build.to.fstype in valid_fstypes)) {
+		L.die("File system type '%s' should be one of %s\n", build.to.fstype, valid_fstypes);
+	}
+
+	// Next, reduce candidate images to just those with desired fstype.
+	images = filter(images, (img) => img.filesystem == build.to.fstype);
+
+	// Here is where we fix our guess for 'sutype' made above in
+	// 'collect_device_info' (look for "sdcard" there).
+	let valid_sutypes = uniq(sort(map(images, (img) => img.type)));
+	if (! (device.sutype in valid_sutypes)) {
+		if (device.sutype == "sysupgrade" && length(valid_sutypes) == 1)
+			device.sutype = valid_sutypes[0];
+		else
+			L.bug("%s:%s Sysupgrade type '%s' should be one of %s\n",
+				device.target, device.platform, device.sutype, valid_sutypes);
+	}
+
+	for (let img in images) {
+		if (img.filesystem == build.to.fstype && img.type == device.sutype) {
+			build.to.img_file = img.name;
+			break;
+		}
+	}
+}
+
+function collect_overview()
+{
+	// When building the versions list, refer to
+	//   https://openwrt.org/docs/guide-developer/security#support_status
+
+	collect_device_info();
+
+	let overview = dl_overview();
+	url.upstream = overview.upstream_url ?? default_upstream;
+	server_limits = {
+		max_rootfs_size: overview.server?.max_custom_rootfs_size_mb || 1024,
+		max_defaults_length:  overview.server?.max_defaults_length || 20480,
+	};
+	if (options.rootfs_size && options.rootfs_size > server_limits.max_rootfs_size) {
+		L.die("%d is above this server's maximum rootfs partition size of %d MB\n", 
+			options.rootfs_size, server_limits.max_rootfs_size);
+	}
+
+	let bad_releases = [ "23.05.1", ];
+
+	release = {
+		branch:   null, // Release branch name: "SNAPSHOT" or "21.07" or "23.05"
+		dir:      null, // ASU and DL server release branch directory: "snapshots" or "release/23.05.0"
+		branches: {},
+	};
+
+	for (let branch_id, data in overview.branches) {
+		release.branches[branch_id] = {
+			latest:   null,  // Determined below.
+			versions: filter(data.versions, (v) => !(v in bad_releases)),
+		};
+	}
+
+	// Put everything in order, select 'latest'...
+	release.branches = sort(release.branches, version_cmp);
+	for (let data in values(release.branches)) {
+		data.versions = sort(data.versions, version_cmp);
+		for (let version in data.versions) {
+			if (index(version, "-SNAPSHOT") >= 0) continue;
+			if (data.latest == null || version_older(data.latest, version)) {
+				data.latest = version;
+			}
+		}
+	}
+
+	collect_build_info();
+
+	release.branch = branch_of(build.to.version);
+
+	let active_branch = overview.branches[release.branch];
+	if (! active_branch) {
+		// TODO Should probably check:
+		//    || ! (build.to.version in release.branches[release.branch].versions)
+		// but the versions list we got from the overview is incomplete
+		// (i.e., ASU server will build a lot more than is shown) and
+		// we catch that when trying to fetch board_json below.
+		show_versions(true);
+		exit(EXIT_ERR);
+	}
+
+	release.dir      = replace(active_branch.path, "{version}", build.to.version);
+	packages.changes = active_branch.package_changes;
+}
+
+function collect_platform()
+{
+	// ASU platform.json often updates days after upstream profiles, so the
+	// 'version_code' is wrong and build requests fail.  As of 2024-06-09,
+	// this appears to have been solved, see ASU commit 1e6484d.
+	//
+	// Previously, to solve this issue we'd look at the download server:
+	//   url.platform = `${url.upstream}/${release.dir}/targets/${device.target}/profiles.json`;
+	//   let profile = platform.profiles[device.platform];
+	//
+	// Use upstream as much as possible, per @aparcar's comment:
+	// https://github.com/efahl/owut/issues/2#issuecomment-2165021615
+
+	url.platform = `${url.upstream}/${release.dir}/targets/${device.target}/profiles.json`;
+	let platform = dl_platform();
+	if (! platform) {
+		L.die("Unsupported target '%s'\n", device.target);
+	}
+
+	if (! (device.platform in keys(platform.profiles))) {
+		// This is a mapped profile, e.g.: raspberrypi,model-b-plus -> rpi
+		let found = false;
+		for (let real_platform, data in platform.profiles) {
+			for (let alias in data.supported_devices) {
+				alias = replace(alias, ",", "_");
+				if (device.platform == alias) {
+					found = true;
+					L.log(2, "Mapping platform %s to %s\n", device.platform, real_platform);
+					device.platform = real_platform;
+					break;
+				}
+			}
+			if (found) break;
+		}
+		if (! found) {
+			if ("generic" in keys(platform.profiles))
+				device.platform = "generic";
+			else
+				L.die("Unsupported profile: %s\n  Valid profiles are %s\n", device.platform, keys(platform.profiles));
+		}
+	}
+
+	let profile = platform.profiles[device.platform];
+	device.arch = platform.arch_packages;
+
+	complete_build_info(profile, platform);
+	collect_defaults(platform.default_packages, profile.device_packages);
+
+	if ("linux_kernel" in platform) {
+		build.to.kernel = platform.linux_kernel.version;
+	}
+}
+
+function collect_all()
+{
+	collect_overview();
+	collect_platform();
+
+	let location = build.to.is_snapshot()
+		     ? "snapshots/faillogs"
+		     : `releases/faillogs-${release.branch}`;
+	url.failed   = `${url.upstream}/${location}/${device.arch}/`;
+
+	url.pkg_arch = `${url.static_root}/${release.dir}/packages/${device.arch}-index.json`;
+	url.pkg_plat = `${url.static_root}/${release.dir}/targets/${device.target}/index.json`;
+
+	let prefix   = "openwrt-";
+	let starget  = replace(device.target, /\//, "-");
+	if (! build.to.is_snapshot())    prefix = `${prefix}${build.to.version}-`;
+	if (build.to.is_rel_snapshot())  prefix = lc(`${prefix}${build.to.rev_code}-`);
+
+	url.download = `${url.upstream}/${release.dir}/targets/${device.target}`;
+
+	collect_packages();
+
+	if (! build.to.kernel) {
+		// Fall back to pre-"linux_kernel" scanning of packages.
+		build.to.kernel = "unknown";
+		for (let pkg, data in packageDB) {
+			if (data.new_version && index(pkg, "kmod-") == 0 && is_default(pkg)) {
+				build.to.kernel = match(data.new_version, /^\d+\.\d+\.\d+/)[0];
+				break;
+			}
+		}
+	}
+
+	pkg_name_len = max(...map(keys(packageDB), length), ...map(packages.default, length));
+}
+
+//------------------------------------------------------------------------------
+
+function dump()
+{
+	// Send forth a json representation of all the stuff we've collected.
+	let comma = (l) => L.show(l) ? "," : "";
+	let inst = sort(packages.installed);
+	let urls = sort(url);
+	let tmps = sort(tmp);
+	let pkgs = sort(packageDB);
+	L.log(-1, '{\n');
+	L.log(-1, '"version": "%s",\n', PROG);
+	L.log(-1, '"options": %.2J,\n', options);
+	L.log(-1, '"server_limits": %.2J,\n', server_limits);
+	L.log( 1, '"url": %.2J,\n', urls);
+	L.log( 1, '"tmp": %.2J,\n', tmps);
+	L.log( 1, '"build": %.2J,\n', build);
+	L.log(-1, '"device": %.2J,\n', device);
+	L.log( 0, '"release": %.2J%s\n', release, comma(2));
+	L.log( 2, '"packageDB": %.2J%s\n', pkgs, comma(3));
+	L.log( 3, '"packages": %.2J\n', packages);
+	L.log(-1, '}\n');
+}
+
+function list()
+{
+	// Generate a list formatted for use with firmware-selector or
+	// source build.
+	let packages;
+	switch (options.format) {
+		case "config":
+			packages = top_level(SrcType.USER_ONLY);
+			let ctype = "y"; // "y" to install, "m" just build package.
+			for (let pkg in sort(packages)) {
+				L.log(0, "CONFIG_PACKAGE_%s=%s\n", pkg, ctype);
+			}
+			break;
+
+		case "fs-all":
+			packages = top_level(SrcType.ALL);
+			L.log(0, "%s\n", join(" ", packages));
+			break;
+
+		case "fs-user":
+		default:
+			packages = top_level(SrcType.USER_ONLY);
+			push(packages, ...map(removed_defaults(), (pkg) => "-"+pkg));
+			L.log(0, "%s\n", join(" ", packages));
+			break;
+	}
+}
+
+function show_config()
+{
+	// Pretty-print the major configuration values.
+	let downgrade = build.to.is_downgrade_from(build.from) ? L.colorize(L.RED, " DOWNGRADE") : "";
+	let hash = split(build.to.rev_code, "-")[1];
+	L.log(0,
+		`ASU-Server     ${url.sysupgrade_root}\n`
+		`Upstream       ${url.upstream}\n`
+		`Target         ${device.target}\n`
+		`Profile        ${device.platform}\n`
+		`Package-arch   ${device.arch}\n`
+	);
+	L.log(1,
+		`Root-FS-type   ${device.fstype}\n`
+		`Sys-type       ${device.sutype}\n`
+	);
+	L.log(0,
+		`Version-from   ${build.from.version} ${build.from.rev_code} (kernel ${build.from.kernel})\n`
+		`Version-to     ${build.to.version} ${build.to.rev_code} (kernel ${build.to.kernel})${downgrade}\n`
+	);
+	if (hash)
+	L.log(1, `Build-commit   https://git.openwrt.org/?p=openwrt/openwrt.git;a=shortlog;h=${hash}\n`);
+	L.log(1,
+		`Build-FS-type  ${build.to.fstype}\n`
+		`Build-at       ${build.to.date}\n`
+		`Image-prefix   ${build.to.img_prefix}\n`
+		`Image-URL      ${url.download}\n`
+		`Image-file     ${build.to.img_file}\n`
+	);
+	L.log(1, "Installed      %3d packages\n", length(packageDB));
+	L.log(1, "Top-level      %3d packages\n", length(top_level(SrcType.ALL)));
+	L.log(1, "Default        %3d packages\n", length(packages.default));
+	L.log(1, "User-installed %3d packages (top-level only)\n", length(top_level(SrcType.USER_ONLY)));
+	L.log(1, "\n");
+}
+
+function check_updates()
+{
+	// Scan the old and new package lists, return the number of changed
+	// packages and the number of missing packages that would cause a
+	// build failure.
+
+	let changes    = 0;
+	let missing    = 0;
+	let downgrades = 0;
+
+	L.log(1, "Package version changes:\n");
+	let w0 = pkg_name_len + 2;
+	let w1 = max(...map(values(packageDB), (p) => length(p.version)));
+	let f0 = `  %-${w0}s  %s%-${w1}s %s%s%s\n`;
+	let new = '';
+	for (let pkg, data in sort(packageDB)) {
+		if (pkg in packages.non_upgradable) continue;
+
+		let old = data.version;
+		let new = data.new_version;
+		if (old == new) continue;
+		let cmp = pkg_ver_cmp(old, new, true);
+		if (cmp == 0) continue;
+
+		changes++;
+		let c1 = "";
+		let c2 = "";
+		switch (cmp) {
+			case -2: // Old is null.
+				// This happens when you '--add' a new package.
+				c1  = L.color(L.YELLOW);
+				old = "not-installed";
+				// fallthrough
+			case -1:
+				c2 = L.color(L.GREEN);
+				break;
+
+			case  1:
+				downgrades++;
+				c2 = L.color(L.RED);
+				break;
+
+			case  2: // New is null.
+				if (! is_top_level(pkg) && ! is_default(pkg))
+					c2  = L.color(L.YELLOW);
+				else {
+					missing++;
+					c2  = L.color(L.RED);
+				}
+				new = "missing to-version";
+				break;
+
+			case 99:
+				// They are different (hashes usually), but we
+				// can't tell if one is older than the other.
+				c2 = L.color(L.YELLOW);
+				break;
+		}
+		L.log(1, f0, pkg, c1, old, c2, new, L.color(L.reset));
+	}
+
+	if (missing) {
+		L.log(0, "%d packages missing in target version, %s\n", missing, L.colorize(L.RED, "cannot upgrade"));
+	}
+	if (downgrades) {
+		L.log(0, "%d packages were downgraded\n", downgrades);
+	}
+	if (changes) {
+		L.log(0, "%d packages are out-of-date\n", changes);
+	}
+	else {
+		L.log(0, "All packages are up-to-date\n");
+	}
+
+	if (length(packages.replaced)) {
+		let f0 =`  %-${w0}s  %s\n`;
+		L.log(1, "\nAutomatic package replacements/removals:\n");
+		L.log(1, f0, "Package", "Replaced-by");
+		for (let chg, to in sort(packages.replaced)) {
+			L.log(1, f0, chg, to ?? L.colorize(L.YELLOW, "removed"));
+		}
+		L.log(1, "Details at %s\n", url.overview);
+	}
+
+	L.log(1, "\n");
+
+	return { missing, changes, downgrades };
+}
+
+function check_missing()
+{
+	// Mostly silent check for missing packages.  Used when generating a
+	// package list for external uses, 'list' or 'blob'.
+	L.push(-1);
+	let updates = check_updates();
+	L.pop();
+	if (updates.missing) {
+		L.err("There are %s missing packages in the build package list, run 'owut check'\n", updates.missing);
+		return false;
+	}
+	return true;
+}
+
+function check_defaults()
+{
+	// Scan the package defaults to see if they are
+	//    1) missing from the installation or
+	//    2) modified/replaced by some other package.
+
+	let ignored = parse_package_list(options.ignored_defaults);
+	let changes = {};
+	let count   = { ignored: 0, retained: 0, replaced: 0, removed: 0 };
+	for (let pkg in packages.default) {
+		if (pkg in packages.non_upgradable) continue;
+		if (pkg in ignored) {
+			count.ignored++;
+			changes[pkg] = L.colorize(L.GREEN, "user ignored");
+		}
+		else if (is_installed(pkg))
+			count.retained++;
+		else {
+			changes[pkg] = what_provides(pkg);
+			if (changes[pkg])
+				count.replaced++;
+			else {
+				count.removed++;
+				changes[pkg] = L.colorize(L.YELLOW, "not installed");
+			}
+		}
+	}
+
+	L.log(1, "Default package analysis:\n");
+	if (length(changes) == 0) {
+		L.log(1, "  No missing or modified default packages\n\n");
+	}
+	else {
+		if (! L.show(1))
+			L.log(0, "There are %d missing and %d modified default packages\n", count.removed, count.replaced);
+
+		let wid = pkg_name_len + 2;
+		let fmt = `  %-${wid}s  %s\n`;
+		L.log(1, fmt, "Default", "Provided-by");
+		for (let p, a in changes) {
+			L.log(1, fmt, p, a);
+		}
+		L.log(1, "\n");
+	}
+
+	return count;
+}
+
+function check_pkg_builds()
+{
+	// Scraping the failures.html is a total hack.
+	// Let me know if you have an API on downloads (or other build site)
+	// that can give this info.
+	//
+	// The lines we're scraping look like:
+	//    <tr><td class="n"><a href="gummiboot/">gummiboot</a>/</td><td class="s">-</td><td class="d">Tue Apr 23 07:05:36 2024</td></tr>
+
+	let info = regexp(
+		'<td class="n"><a href="[^<]*">([^<]*)</a>/</td>' +
+		'<td class="s">[^<]*</td>' +
+		'<td class="d">([^<]*)</td>',
+		'g'
+	);
+
+	let n_failed = 0;
+	let n_broken = 0;
+
+	let html_blob = dl_failures();
+	let feeds = map(match(html_blob, info), (f) => f[1]);
+	if (! html_blob || ! feeds) {
+		L.log(1, "No package build failures found for %s %s.\n\n", build.to.version, device.arch);
+	}
+	else {
+		L.log(1, "There are currently package build failures for %s %s:\n", build.to.version, device.arch);
+
+		for (let feed in feeds) {
+			L.log(1, "  Feed: %s\n", feed);
+			html_blob = dl_failures(feed);
+			if (html_blob) {
+				let fails = match(html_blob, info);
+				let fmt   = `    %-${pkg_name_len}s  %s - %s\n`;
+
+				for (let fail in fails) {
+					n_broken++;
+					let pkg  = fail[1];
+					let date = fail[2];
+					let msg;
+					if (is_installed(pkg)) {
+						n_failed++;
+						msg = L.colorize(L.RED, "package installed locally, cannot upgrade");
+					}
+					else {
+						msg = "not installed";
+					}
+					L.log(1, fmt, pkg, date, msg);
+				}
+			}
+		}
+
+		let prefix = n_failed ?
+			L.colorize(L.RED,   `${n_failed} of ${n_broken} package build failures affect this device:`) :
+			L.colorize(L.GREEN, `${n_broken} package build failures don't affect this device,`);
+		L.log(n_failed ? 0 : 1, "%s details at\n  %s\n\n", prefix, url.failed);
+	}
+
+	return ! n_failed;
+}
+
+function check_init_script()
+{
+	// If
+	//   1) the user has an immutable image, and
+	//   2) that image contains an ASU generated custom defaults file, and
+	//   3) the user has not mentioned or overridden it,
+	// then warn them and have them read the documentation.
+
+	const asu_defaults = "/rom/etc/uci-defaults/99-asu-defaults";
+	if (options.init_script) {
+		if (options.init_script != "-" && ! fs.access(options.init_script)) {
+			L.die("The specified init-script '%s' does not exist\n", options.init_script);
+		}
+	}
+	else if (fs.access(asu_defaults)) {
+		L.wrn(`You have a custom uci-defaults script at\n`
+			`  ${asu_defaults}\n`
+			`and have not referenced it with the 'init-script' option.\n`
+			`Please read:\n`
+			`  ${wiki_url}#using_a_uci-defaults_script\n\n`
+		);
+	}
+}
+
+function blob(report)
+{
+	// Exclude default packages unless explicitly listed in 'packages'.  When
+	// moving between releases, default packages may be added, deleted or
+	// renamed, which can result in bricks if something important is missed.
+
+	let contains_defaults = true;
+
+	let log_level = report ? 1 : 2;
+
+	// We try to use 'packages_versions' in our server request, but can
+	// only do so if all packages have valid versions.  We fall back to
+	// using 'packages' when any version is undefined.
+	let package_list  = { packages: top_level(SrcType.ALL) };
+	package_list["packages_versions"] = with_versions(package_list.packages);
+	package_list["type"] = null in values(package_list.packages_versions) ? "packages" : "packages_versions";
+
+	let init_script;
+	if (options.init_script) {
+		let inits_file = options.init_script == "-" ? fs.stdin : fs.open(options.init_script);
+		if (! inits_file) {
+			L.err("Init script file '%s' does not exist\n", options.init_script);
+			return null;
+		}
+		else {
+			init_script = inits_file.read("all");
+			inits_file.close();
+			if (length(init_script) > server_limits.max_defaults_length) {
+				L.err("'%s' is over the ASU server's %s byte maximum\n", options.init_script, server_limits.max_defaults_length);
+				return null;
+			}
+		}
+	}
+
+	let rc = (options.rev_code == "none" ? "" : options.rev_code) ?? build.to.rev_code;
+
+	L.log(log_level, "Request:\n  Version %s %s (kernel %s)\n", build.to.version, rc || "none", build.to.kernel);
+	if (build.to.fstype != device.fstype) {
+		L.log(log_level, "  Change file system type from '%s' to '%s'\n", device.fstype, build.to.fstype);
+	}
+
+	let blob = {
+		client:        PROG,
+		target:        device.target,
+		profile:       device.platform,  // sanitized board name
+
+		version:       build.to.version,
+		version_code:  rc,
+		filesystem:    build.to.fstype,
+
+		diff_packages: contains_defaults,
+	};
+	blob[package_list.type] = package_list[package_list.type];
+
+	if (options.rootfs_size) {
+		if (options.rootfs_size > server_limits.max_rootfs_size) {
+			L.die("This server allows a maximum rootfs partition size of %d MB\n", server_limits.max_rootfs_size);
+		}
+
+		blob.rootfs_size_mb = options.rootfs_size;
+		L.log(log_level, "  ROOTFS_PARTSIZE set to %d MB\n", options.rootfs_size);
+	}
+
+	if (init_script) {
+		blob.defaults = init_script;
+		L.log(log_level, "  Included init script '%s' (%d bytes) in build request\n", options.init_script, length(init_script));
+	}
+
+	return blob;
+}
+
+function json_blob()
+{
+	let b = blob(true);
+	return b ? sprintf("%J", b) : null;
+}
+
+function show_blob()
+{
+	let b = blob();
+	if (b) {
+		L.log(0, "%.2J\n", b);
+	}
+}
+
+function select_image(images)
+{
+	for (let image in images) {
+		if (image.filesystem == build.to.fstype && image.type == device.sutype) {
+			return image;
+		}
+	}
+	return null;
+}
+
+function verify_image()
+{
+	// Verify the image with both the saved sha256sum and by passing it
+	// to 'sysupgrade --test'.
+	//
+	// Failed images will be delete, unless '--keep' is set.
+
+	let image = options.image;
+
+	if (! fs.access(image)) {
+		L.err("Image file '%s' does not exist\n", image);
+		return false;
+	}
+
+	let info = fs.stat(image);
+	L.log(1, "Verifying   : %s (%d bytes) against %s\n", image, info.size, tmp.firmware_sums);
+
+	let result = sha256.verify();
+	if (result?.code == 0) {
+		L.log(1, "  Saved sha256 matches\n");
+	}
+	else {
+		let file_sha = sha256.sum(image);
+		let expected = sha256.saved_sum(image);
+		L.err(`sha256 doesn't match:\n`
+		    `    calculated '${file_sha}'\n`
+		    `    saved      '${expected}'\n`);
+		if (! options.keep) {
+			fs.unlink(image);
+		}
+		return false;
+	}
+
+	result = sysupgrade(image, true, ["--test"]);
+	if (result?.code == 0) {
+		L.log(1, "  %s\n", join("\n  ", split(trim(result.stderr), "\n")));
+	}
+	else {
+		L.err("sysupgrade validation failed:\n");
+		if (result.stdout) L.log(0, "stdout =\n%s\n", result.stdout);
+		if (result.stderr) L.log(0, "stderr =\n%s\n", result.stderr);
+		if (! options.keep) {
+			fs.unlink(image);
+		}
+		return false;
+	}
+
+	L.log(1, "Checks complete, image is valid.\n");
+	return true;
+}
+
+function download()
+{
+	// Use the json_blob to create a build request, run the request and
+	// download the result.
+	//
+	// On success, return true.
+	//
+	// Certain failures often indicate that the ASU server has fallen
+	// behind the build servers.  For example,
+	//
+	//   Error: Received incorrect version r26608-blah (requested r26620-blah)
+	//
+	// When we see one of these cases, we display one or more error
+	// messages, increment an error counter and use the counter to fall
+	// out of the main build-polling loop, and then generate a final
+	// message "wait a bit and retry".
+	//
+	// Other inexplicable or better explained errors simply show the error
+	// message and then immediately return false.
+
+	let blob = json_blob();
+	if (! blob) return false;
+
+	if (options.keep) {
+		L.log(2, "Saving build blob to %s\n", tmp.req_json);
+		let save = fs.open(tmp.req_json, "w");
+		if (save) {
+			save.write(blob);
+			save.close();
+		}
+	}
+
+	let response      = dl_build(blob);
+	let t_start       = time();
+	let t_build_start = t_start;
+
+	let hash = response?.request_hash;
+	if (hash) {
+		L.log(0, "Request hash:\n  %s\n", hash);
+		url.build_status = replace(url.build_status, "{hash}", hash);
+	}
+
+	let errors        = 0;
+	let prev_status   = "";
+	let poll_interval = 500;  // Check first response right away.
+	while (response && !errors) {
+		let status = response.status;
+
+		if (response.detail == prev_status) {
+			L.backup();
+		}
+		else {
+			L.log(0, "--\n");
+			L.mark();
+			prev_status = response.detail;
+		}
+
+		let t_now = time();
+		let highlight = substr(response.detail, 0, 6) == "Error:" ? L.RED : L.GREEN;
+		L.log(0, "Status:   %s", L.colorize(highlight, response.detail));
+		switch (response.detail) {
+			case "queued":
+				L.log(0, " - %d ahead of you", response.queue_position);
+				t_build_start = t_now;
+				break;
+			case "started":
+				L.log(0, " - %s", response.imagebuilder_status ?? "setup");
+				break;
+			default:
+				break;
+		}
+		L.log(0, "\n");
+
+		let t_total = t_now - t_start;
+		let t_queue = t_build_start - t_start;
+		let t_build = t_now - t_build_start;
+		L.log(0, "Progress: %3ds total = %3ds in queue + %3ds in build\n", t_total, t_queue, t_build);
+
+		switch (status) {
+			case 202: // Build in-progress, update monitor at user-specified interval.
+				sleep(poll_interval);
+				poll_interval = options.poll_interval;
+				response = dl_build_status();
+				break;
+
+			case 200: // All done.
+				let req_version_code = response.request.version_code;
+				L.log(0, "\nBuild succeeded in %3ds total = %3ds in queue + %3ds to build:\n", t_total, t_queue, t_build);
+				L.log(2, "  build_at       = %s\n", response.build_at);
+				L.log(1, "  version_number = %s\n", response.version_number);
+				L.log(1, "  version_code   = %s (requested %s)\n", response.version_code, req_version_code);
+				L.log(1, "  kernel_version = %s\n", build.to.kernel);
+				L.log(1, "  rootfs_size_mb = %s\n", response.request.rootfs_size_mb ?? "default");
+				L.log(1, "  init-script    = %s\n", response.request.defaults ? options.init_script : "no-init-script");
+				L.log(3, "  images = %.2J\n",       response.images);
+				L.log(4, "  build_cmd = %.2J\n",    response.build_cmd);
+				L.log(4, "  manifest = %.2J\n",     response.manifest);
+				L.log(1, "\n");
+
+				let image = select_image(response.images);
+				if (! image) {
+					L.err("Could not locate an image for '%s' and '%s'\n", build.to.fstype, device.sutype);
+					return false;
+				}
+
+				let sha = image.sha256;  // LuCI-ASU uses sha256_unsigned for something...
+				let dir = response.bin_dir;
+				let bin = `${url.store_root}/${dir}`;
+				let img = `${bin}/${image.name}`;
+				let dst = options.image;
+
+				L.log(1, "Image source: %s\n", img);
+
+				let rsp = _request(img, dst);
+				if (rsp?.status != 200) {
+					L.err("Couldn't download image %s\n", image.name);
+					return false;
+				}
+				L.log(0, "Image saved : %s\n", dst);
+
+				sha256.save(dst, sha);
+
+				// Create the manifest, and validate against request.
+				let manifest = response.manifest;
+				let manifest_file = fs.open(tmp.firmware_man, "w");
+				if (manifest_file) {
+					manifest_file.write(sprintf("%.2J\n", response));
+					manifest_file.close();
+					L.log(1, "Manifest    : %s\n", tmp.firmware_man);
+				}
+
+				if (req_version_code && response.version_code != req_version_code) {
+					L.err("Firmware revision mismatch: expected %s, but got %s\n" +
+					      "If you determine this is acceptable, simply 'owut verify' " +
+					      "and 'owut install'.\n",
+						req_version_code, response.version_code);
+					errors++;
+				}
+
+				for (let pkg in top_level(SrcType.ALL)) {
+					if (pkg in packages.non_upgradable) continue;
+					if (! (pkg in manifest)) {
+						L.err("Firmware missing requested package: '%s'\n", pkg);
+						errors++;
+						continue;
+					}
+
+					let expected_version = packageDB[pkg].new_version;
+					let received_version = manifest[pkg];
+					if (received_version != expected_version) {
+						L.err("Firmware package version mismatch: '%s', expected %s, but got %s\n",
+							pkg, expected_version, received_version);
+						errors++;
+						continue;
+					}
+				}
+
+				return errors == 0;
+
+			// Everything else is "failure - we're done" cases.
+			case 400: // Invalid build request.
+			case 422: // Unknown package.
+			case 500: // Invalid build request.
+			default:  // ???
+				L.log(0, "\nBuild failed in %3ds total = %3ds in queue + %3ds to build:\n", t_total, t_queue, t_build);
+				if (response.error ) L.log(0, "%s =\n%s\n", L.colorize(L.RED, "ASU server error"), response.error);
+				if (response.stdout) L.log(0, "%s =\n%s\n", L.colorize(L.RED, "ASU server stdout"), response.stdout);
+				if (response.stderr) L.log(0, "%s =\n%s\n", L.colorize(L.RED, "ASU server stderr"), response.stderr);
+				L.err("Build failed with status %s (--version-to %s --device %s:%s:%s)\n",
+					status, build.to.version, device.target, device.platform, build.to.fstype);
+				errors++;
+				break;
+		}
+	}
+
+	if (errors) {
+		L.log(0, "The above errors are often due to the upgrade server lagging behind the\n" +
+			 "build server, first suggestion is to wait a while and try again.\n");
+	}
+	return false;
+}
+
+function run_pre_install_hook()
+{
+	// Execute a user program just prior to doing the final installation.
+
+	if (options.pre_install) {
+		if (! fs.access(options.pre_install))
+			L.die(`Cannot access pre-install script '${options.pre_install}', aborting upgrade\n`);
+
+		L.log(1, "Executing pre-install script '%s'...\n", options.pre_install);
+
+		let result = ubus.run(options.pre_install);
+
+		if (result?.stdout) L.log(0, result.stdout);
+		if (result?.stderr) L.log(0, result.stderr);
+		if (result.code != 0)
+			L.die(`Pre-install script '${options.pre_install}' failed with status ${result.code}, aborting upgrade\n`);
+		L.log(1, "Pre-install script successful, proceeding with upgrade\n");
+	}
+}
+
+function install()
+{
+	// Run sysupgrade to install the image.
+	// Probably need some more options reflected from sysupgrade itself.
+	// '-n' = discard config comes to mind first, maybe '-f' = force, too.
+
+	run_pre_install_hook();  // Run user's pre-install hook.
+
+	sysupgrade(options.image, false);
+	L.log(0, "Installing %s and rebooting...\n", options.image);
+}
+
+//------------------------------------------------------------------------------
+
+if (options.verbosity > 0 && ! (options.command in ["dump", "blob", "list"])) {
+	arg_defs.show_version();
+}
+
+uloop.init();
+ubus.init();
+
+initialize_urls();
+
+let updates, counts, details;
+let exit_status = EXIT_ERR;   // Assume failure, until we know otherwise.
+
+function terminate()
+{
+//	system("grep -E 'VmRSS|VmPeak' /proc/$PPID/status");
+	if (uloop.running()) uloop.end();
+	uloop.done();
+	ubus.term();
+	_del_uclient();
+	exit(exit_status);
+}
+
+signal("SIGINT", terminate);  // Ensure ctrl-C works when inside build loop.
+
+switch (options.command) {
+	case "versions":
+		collect_overview();
+		show_versions(false);
+		exit_status = EXIT_OK;
+		break;
+
+	case "dump":
+		L.push(-1);
+		collect_all();
+		L.pop();
+		dump();
+		L.push(-1);
+		exit_status = EXIT_OK;
+		break;
+
+	case "list":
+		collect_all();
+		list();
+		if (check_missing()) exit_status = EXIT_OK;
+		break;
+
+	case "check":
+		collect_all();
+		show_config();
+		updates = check_updates();
+		counts = check_defaults();
+		if (check_pkg_builds() && ! updates.missing) exit_status = EXIT_OK;
+		check_init_script();
+		if (counts.removed)
+			L.wrn("There are %d missing default packages, confirm this is expected before proceeding\n", counts.removed);
+
+		details = L.show(1) ? "\n" : " (re-run with '--verbose' for details)\n";
+		if (exit_status != EXIT_OK)
+			L.err("Checks reveal errors, do not upgrade%s", details);
+		else if (updates.downgrades)
+			L.wrn("Checks reveal package downgrades, upgrade still possible with '--force'%s", details);
+		else if (updates.changes == 0)
+			L.log(0, "There are no changes, upgrade not necessary%s", details);
+		else
+			L.log(0, "It is safe to proceed with an upgrade%s", details);
+		break;
+
+	case "blob":
+		collect_all();
+		check_init_script();
+		show_blob();
+		if (check_missing()) exit_status = EXIT_OK;
+		break;
+
+	case "download":
+	case "upgrade":
+		collect_all();
+		show_config();
+		updates = check_updates();
+
+		details = L.show(1) ? "\n" : " (run 'owut check --verbose' for details)\n";
+		if (updates.downgrades && ! options.force) {
+			L.err("Update checks reveal package downgrades%s", details);
+			break;
+		}
+		if (updates.missing) {
+			L.err("Update checks reveal errors, can't proceed%s", details);
+			break;
+		}
+		counts = check_defaults();
+		if (! check_pkg_builds()) {
+			L.err("Package build checks reveal errors, can't proceed%s", details);
+			break;
+		}
+		if (counts.removed)
+			L.wrn("There are %d missing default packages, confirm this is expected before proceeding%s", counts.removed, details);
+		if (updates.changes == 0) {
+			if (options.force)
+				L.wrn("Forcing build with no changes%s", details);
+			else {
+				L.log(0, "There are no changes to %s (see '--force')\n", options.command);
+				exit_status = EXIT_OK;
+				break;
+			}
+		}
+		check_init_script();
+		if (! download()) break;
+		// fallthrough
+	case "verify":
+	case "install":
+		if (verify_image()) {
+			exit_status = EXIT_OK;
+			if (options.command in ["upgrade", "install"]) {
+				install();
+			}
+		}
+		break;
+
+	default:
+		L.err("'%s' not implemented\n", options.command);
+		break;
+}
+
+dl_stats.report();
+
+terminate();

@@ -46,10 +46,27 @@ def save_to_db(req_method, req_path, req_query, req_headers, req_body, res_statu
     global id_counter # response_id
 
     # Bytes to Strings
+    if req_query is None:
+        req_query = "<EMP>"
+    if req_body is None:
+        req_body = "<EMP>"
+    if req_headers is None:
+        req_headers = "<EMP>"
+    if res_headers is None:
+        res_headers = ""
+    if res_body is None:
+        res_body = b""
+
     if type(req_query) == bytes:
         req_query = req_query.decode("utf-8")
     if type(req_body) == bytes:
         req_body = req_body.decode("utf-8")
+    if not isinstance(req_body, str):
+        req_body = str(req_body)
+    if not isinstance(req_query, str):
+        req_query = str(req_query)
+    if not isinstance(req_headers, str):
+        req_headers = str(req_headers)
 
     # Convert space to "#" for training word2vec 
     req_headers = req_headers.replace(" ", "#")
@@ -91,6 +108,78 @@ def save_to_db(req_method, req_path, req_query, req_headers, req_body, res_statu
 
     # Lock release
     lock.release()
+
+
+def record_http_interaction(ip, req_method, req_path, req_query, req_headers, req_body):
+    """Fetch a URL and persist the request/response pair even for redirects or errors."""
+    method = req_method.upper()
+    request_kwargs = {
+        "headers": req_headers if isinstance(req_headers, dict) else {},
+        "verify": False,
+        "timeout": 3,
+        "allow_redirects": False,
+    }
+
+    query_pairs = {}
+    if req_query and req_query != "<EMP>":
+        query_pairs = dict(urllib.parse.parse_qsl(req_query, keep_blank_values=True))
+
+    try:
+        if method == "POST":
+            data = dict(urllib.parse.parse_qsl(req_body, keep_blank_values=True)) if req_body not in ["<EMP>", "", None] else None
+            response = requests.post(ip + req_path, params=query_pairs or None, data=data, **request_kwargs)
+        else:
+            response = requests.get(ip + req_path, params=query_pairs or None, **request_kwargs)
+
+        save_to_db(
+            method,
+            req_path,
+            req_query if req_query else "<EMP>",
+            shape_req_headers(req_headers if isinstance(req_headers, dict) else {}),
+            req_body if req_body else "<EMP>",
+            int(response.status_code),
+            shape_res_headers(response.headers),
+            response.content,
+            ip,
+        )
+        return True
+    except requests.RequestException as e:
+        error_body = str(e).encode("utf-8", errors="ignore")
+        save_to_db(
+            method,
+            req_path,
+            req_query if req_query else "<EMP>",
+            shape_req_headers(req_headers if isinstance(req_headers, dict) else {}),
+            req_body if req_body else "<EMP>",
+            599,
+            "Content-Type: text/plain",
+            error_body,
+            ip,
+        )
+        return False
+
+
+def get_fallback_urls():
+    """Minimal set of endpoints to probe even when filesystem crawling is sparse."""
+    return [
+        "/",
+        "/index.html",
+        "/cgi-bin/luci",
+        "/login",
+        "/admin",
+    ]
+
+
+def seed_fallback_scan_targets(urllist):
+    """Ensure baseline URLs are always scanned."""
+    normalized = set()
+    combined = []
+    for url in get_fallback_urls() + urllist:
+        candidate = url if url.startswith("/") else "/" + url
+        if candidate not in normalized:
+            normalized.add(candidate)
+            combined.append(candidate)
+    return combined
 
 #------------------------------------------------
 # Crawling with Selenium
@@ -169,43 +258,21 @@ def crawl_by_requests(ip, urllist):
     
         print("[*] Trying", str(counter) + "/" + str(len(urllist)),  "(" + ip + url + ")", "...")
     
-        # Request
         req_method = "GET"
-        req_headers = "<EMP>"
+        req_headers = {}
         req_body = "<EMP>"
-    
-        # Request path include query
+
         if "?" in url:
-    
             req_path = url.split('?')[0]
             req_query = url.split('?')[-1]
-            
-            try:
-                response = requests.get(ip+req_path, params=dict(urllib.parse.parse_qsl(req_query)), verify=False, timeout=1)
-            except Exception as e:
-                continue
-    
-        # Request path don't include query
         else:
-    
             req_path = url
             req_query = "<EMP>"
-    
-            try: # req_query == "<EMP>":
-                response = requests.get(ip+req_path, verify=False, timeout=1)
-            except Exception as e:
-                continue
-    
+
         if not req_path.startswith("/"):
             req_path = "/" + req_path
 
-        # Response
-        res_status = int(response.status_code) # status
-        res_headers = shape_res_headers(response.headers) # headers
-        res_body = response.content # body
-
-        # Save to DB
-        save_to_db(req_method, req_path, req_query, req_headers, req_body, res_status, res_headers, res_body, ip)
+        record_http_interaction(ip, req_method, req_path, req_query, req_headers, req_body)
     
 #------------------------------------------------
 # Header Fuzzing with Requests
@@ -220,8 +287,8 @@ def header_fuzzing(ip, request_list, cookie):
         headers = header_fuzzer()
         print("[*] Header Fuzzing (", counter, "/", scan_params["header_num"], ") :", headers, ip)
     
-        # Send requests
-        for request in request_list:
+            # Send requests
+            for request in request_list:
     
             error_counter = 0
             req_method = request[0] # method
@@ -242,43 +309,7 @@ def header_fuzzing(ip, request_list, cookie):
                 if "Cookie" in headers:
                     del headers["Cookie"]
     
-            # GET (with query)
-            if req_method == "GET" and req_query == "<EMP>":
-                try:
-                    response = requests.get(ip+req_path, headers=headers, verify=False, timeout=1)
-                except Exception as e:
-                    continue
-    
-            # GET (without query)
-            if req_method == "GET" and req_query != "<EMP>":
-                try:
-                    response = requests.get(ip+req_path, params=dict(urllib.parse.parse_qsl(req_query)), headers=headers, verify=False, timeout=1)
-                except Exception as e:
-                    continue
-    
-            # POST
-            if req_method == "POST":
-                try:
-                    if req_body != "<EMP>" and req_query != "<EMP>":
-                        response = requests.post(ip+req_path, params=dict(urllib.parse.parse_qsl(req_query)), headers=headers, data=dict(urllib.parse.parse_qsl(req_body)), verify=False, timeout=1)
-                    elif req_query != "<EMP>":
-                        response = requests.post(ip+req_path, params=dict(urllib.parse.parse_qsl(req_query)), headers=headers, verify=False, timeout=1)
-                    else:
-                        response = requests.post(ip+req_path, headers=headers, verify=False, timeout=1)
-                except Exception as e:
-                    error_counter += 1
-                    continue
-    
-            # Request headers
-            req_headers = shape_req_headers(headers)
-    
-            # Response
-            res_status = int(response.status_code) # status
-            res_headers = shape_res_headers(response.headers) # headers
-            res_body = response.content # body
-    
-            # Save to DB
-            save_to_db(req_method, req_path, req_query, req_headers, req_body, res_status, res_headers, res_body, ip)
+            record_http_interaction(ip, req_method, req_path, req_query, headers, req_body)
     
 #--------------------------------------
 # Login Request
@@ -368,7 +399,7 @@ def main():
     print("[*] Start Crawling")
 
     # Get all files from "www" in the local directory
-    urllist = find_cmd(fs_path + scan_params["www_dirname"])
+    urllist = seed_fallback_scan_targets(find_cmd(fs_path + scan_params["www_dirname"]))
     
     print("[*] The number of all files :", len(urllist))
     
@@ -400,6 +431,11 @@ def main():
     
     c_lrn.execute('select * from learning_table')
     print("[*] All request :", len(c_lrn.fetchall()))
+
+    if requests_only:
+        for ip in ip_list:
+            for fallback_url in get_fallback_urls():
+                record_http_interaction(ip, "GET", fallback_url, "<EMP>", {}, "<EMP>")
 
     # ----- Fuzzing -----
     print("[*] Start Fuzzing")
@@ -546,7 +582,8 @@ if __name__ == '__main__':
     # Get responne_id and set id_counter (id_counter = response_id)
     try:
         c_lrn.execute('select max(res_id) from learning_table')
-        id_counter = c_lrn.fetchall()[0][0] + 1
+        current_max = c_lrn.fetchall()[0][0]
+        id_counter = (current_max + 1) if current_max is not None else 1
     except:
         id_counter = 1
 
