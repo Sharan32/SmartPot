@@ -28,6 +28,7 @@ class StructuredLogger:
         self.log_dir = log_dir
         self.json_log_path = os.path.join(log_dir, json_log_filename)
         self.text_log_path = os.path.join(log_dir, text_log_filename)
+        self.attack_data_path = os.path.join(log_dir, "attack_data.json")
 
         # Ensure log directory exists
         os.makedirs(log_dir, exist_ok=True)
@@ -69,6 +70,11 @@ class StructuredLogger:
         except Exception as e:
             print(f"[!] Error writing text log: {e}")
 
+        try:
+            self._update_attack_data(event)
+        except Exception as e:
+            print(f"[!] Error updating attack data: {e}")
+
     def _format_text_log(self, event: Dict) -> str:
         """Format event as human-readable log line"""
         timestamp = event.get("timestamp", "?")
@@ -87,6 +93,74 @@ class StructuredLogger:
             f"Attack: {attack_tags} (conf:{confidence:.2f}) | "
             f"RL_Ac: {rl_action}"
         )
+
+    def _update_attack_data(self, event: Dict[str, Any]):
+        """Maintain a compact aggregate JSON file for dashboards and demo reporting."""
+        if os.path.exists(self.attack_data_path):
+            with open(self.attack_data_path, "r") as f:
+                data = json.load(f)
+        else:
+            data = {
+                "total_requests": 0,
+                "total_attacks": 0,
+                "attack_type_distribution": {},
+                "top_attacker_ips": {},
+                "top_endpoints": {},
+                "attack_frequency": {},
+                "sessions": {},
+                "last_updated": None,
+            }
+
+        src_ip = event.get("src_ip", "unknown")
+        path = event.get("path", "/")
+        tags = event.get("attack_tags", ["normal"])
+        session_id = event.get("session_id", "unknown")
+        timestamp = event.get("timestamp", datetime.now().isoformat())
+        minute_bucket = timestamp[:16]
+
+        data["total_requests"] += 1
+        data["top_attacker_ips"][src_ip] = data["top_attacker_ips"].get(src_ip, 0) + 1
+        data["top_endpoints"][path] = data["top_endpoints"].get(path, 0) + 1
+        data["attack_frequency"][minute_bucket] = data["attack_frequency"].get(minute_bucket, 0) + 1
+
+        session_entry = data["sessions"].setdefault(
+            session_id,
+            {
+                "ip": src_ip,
+                "request_count": 0,
+                "attack_count": 0,
+                "attack_types": {},
+                "endpoints": {},
+                "started_at": timestamp,
+                "last_seen": timestamp,
+                "duration_seconds": 0,
+            },
+        )
+        session_entry["request_count"] += 1
+        session_entry["last_seen"] = timestamp
+        session_entry["endpoints"][path] = session_entry["endpoints"].get(path, 0) + 1
+        started = datetime.fromisoformat(session_entry["started_at"])
+        current = datetime.fromisoformat(timestamp)
+        session_entry["duration_seconds"] = max(
+            0, int((current - started).total_seconds())
+        )
+
+        attack_tags = [tag for tag in tags if tag != "normal"]
+        if attack_tags:
+            data["total_attacks"] += 1
+            for tag in attack_tags:
+                data["attack_type_distribution"][tag] = (
+                    data["attack_type_distribution"].get(tag, 0) + 1
+                )
+                session_entry["attack_types"][tag] = (
+                    session_entry["attack_types"].get(tag, 0) + 1
+                )
+            session_entry["attack_count"] += 1
+
+        data["last_updated"] = timestamp
+
+        with open(self.attack_data_path, "w") as f:
+            json.dump(data, f, indent=2)
 
     def log_attack(self, src_ip: str, path: str, attack_type: str, confidence: float):
         """Log an attack event"""

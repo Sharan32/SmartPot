@@ -65,6 +65,12 @@ class RLAgent:
         self.conn = sqlite3.connect(db_path)
         self.create_table()
 
+    def _context_to_str(self, context: Tuple) -> str:
+        """Serialize a state tuple without assuming a fixed width."""
+        if isinstance(context, (list, tuple)):
+            return "|".join(str(part) for part in context)
+        return str(context)
+
     def create_table(self):
         """Create Q-table in SQLite"""
         self.conn.execute(
@@ -113,7 +119,7 @@ class RLAgent:
             return 0  # fallback
 
         self.decision_count += 1
-        context_str = f"{context[0]}|{context[1]}"
+        context_str = self._context_to_str(context)
 
         if random.random() < self.epsilon:
             # Exploration: random action
@@ -163,7 +169,7 @@ class RLAgent:
             action: Action taken
             reward: Reward received (0 for normal, 1 for attack detected)
         """
-        context_str = f"{context[0]}|{context[1]}"
+        context_str = self._context_to_str(context)
 
         # Fetch current Q-value
         row = self.conn.execute(
@@ -196,7 +202,7 @@ class RLAgent:
 
     def get_q_value(self, state: Tuple, action: int) -> float:
         """Get Q-value for state-action pair"""
-        context_str = f"{state[0]}|{state[1]}"
+        context_str = self._context_to_str(state)
         return self._get_q_value_from_db(context_str, action)
 
     def _get_q_value_from_db(self, context_str: str, action: int) -> float:

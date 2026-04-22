@@ -288,7 +288,7 @@ def header_fuzzing(ip, request_list, cookie):
         print("[*] Header Fuzzing (", counter, "/", scan_params["header_num"], ") :", headers, ip)
     
             # Send requests
-            for request in request_list:
+        for request in request_list:
     
             error_counter = 0
             req_method = request[0] # method
@@ -487,10 +487,29 @@ def main():
 
     # DB check
     c_rsp.execute('select * from response_table')
-    print("[*] All response :", len(c_rsp.fetchall()))
+    response_count = len(c_rsp.fetchall())
+    print("[*] All response :", response_count)
     
     c_lrn.execute('select * from learning_table')
-    print("[*] All request :", len(c_lrn.fetchall()))
+    request_count = len(c_lrn.fetchall())
+    print("[*] All request :", request_count)
+    
+    # Fallback: if no data, add synthetic responses
+    if response_count == 0 or request_count == 0:
+        print("[!] No data collected, adding fallback responses")
+        for ip in ip_list:
+            for path in ["/", "/index.html", "/cgi-bin/luci", "/login", "/admin"]:
+                save_to_db(
+                    "GET",
+                    path,
+                    "<EMP>",
+                    "User-Agent: FirmPot-Scanner@@@Accept: text/html",
+                    "<EMP>",
+                    200,
+                    "Content-Type: text/html",
+                    b"<html><body><h1>FirmPot Fallback</h1><p>Response for {}</p></body></html>".format(path).encode(),
+                    ip.rstrip('/')
+                )
     
     # DB close
     conn_lrn.commit()

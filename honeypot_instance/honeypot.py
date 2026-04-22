@@ -29,6 +29,7 @@ from gensim.models import KeyedVectors
 import logging
 import logging.handlers
 import warnings
+import shutil
 
 import select
 import urllib.parse
@@ -244,6 +245,23 @@ def get_default_response():
     headers = "Content-Type: text/html; charset=utf-8@@@Connection: close"
     body = b"<html><body><h1>FirmPot</h1><p>Fallback response active.</p></body></html>"
     return 200, headers, body
+
+
+def ensure_runtime_modules():
+    """Copy support modules into the generated instance if they are missing."""
+    required_files = [
+        "detection.py",
+        "logger.py",
+        "metrics.py",
+        "session_manager.py",
+    ]
+    for filename in required_files:
+        if os.path.exists(filename):
+            continue
+        source = os.path.join("..", filename)
+        if os.path.exists(source):
+            shutil.copy(source, filename)
+            print(f"[!] Restored missing runtime module from {source}")
 
 #------------------------------------------------
 # Honeypot Server
@@ -461,7 +479,12 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
             #------------------------------------
 
             k = 3
-            context = (req_path, req_method)
+            context = rl_agent.build_state(
+                req_method,
+                req_path,
+                attack_info["tags"],
+                session.get("request_count", 0),
+            )
 
             try:
                 if is_magnitude:
@@ -552,7 +575,20 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
 
             # Update RL reward
             try:
-                rl_agent.update_reward(context, res_id, 1)
+                reward = 1.0 if "normal" not in attack_info["tags"] else 0.2
+                rl_agent.update_reward(context, res_id, reward)
+                metrics_tracker.record_rl_action(
+                    context,
+                    res_id,
+                    reward,
+                    rl_agent.get_q_value(context, res_id),
+                )
+                structured_logger.log_rl_decision(
+                    context,
+                    res_id,
+                    reward,
+                    rl_agent.get_q_value(context, res_id),
+                )
             except Exception as e:
                 logging_system(f"RL update failed: {e}", True, False)
 
@@ -574,6 +610,7 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
                 attack_info,
                 {"status": res_status, "rl_action": res_id},
             )
+            session_snapshot = session_manager.get_session_metrics(session["id"])
             structured_logger.log_event(
                 {
                     "src_ip": clientip,
@@ -588,9 +625,20 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
                     "rl_action_id": res_id,
                     "profile": session.get("profile"),
                     "session_id": session.get("id"),
+                    "session_duration_seconds": session_snapshot.get("duration_seconds", 0),
+                    "session_request_count": session_snapshot.get("request_count", 0),
                     "response_time_ms": round(response_time * 1000, 2),
                 }
             )
+
+            if "normal" not in attack_info["tags"]:
+                logging_system(
+                    "Attack detected from {0}: tags={1} path={2}".format(
+                        clientip, ",".join(attack_info["tags"]), req_path
+                    ),
+                    False,
+                    False,
+                )
 
             # Logging
             logging_access("{n}[{time}]{s}{clientip}{n}{method}{s}{path}{s}{query}{s}{body}{n}{headers}{n}{status_code}{s}{selected}{s}{candidates}{n}".format(
@@ -630,24 +678,23 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
 
 
 def main():
-
-    # Honeypot Instanse
-    myServer = HoneypotHTTPServer((ip, port), HoneypotRequestHandler)
-    myServer.timeout = timeout
-
-    # Logging
-    logger = logging.getLogger('SyslogLogger')
-    logger.setLevel(logging.INFO)
-    logging_system("Honeypot Start. {0}:{1} at {2}".format(ip, port, get_time()), False, False)
-
-    # Start Honeypot Server
     try:
+        myServer = HoneypotHTTPServer((ip, port), HoneypotRequestHandler)
+        myServer.timeout = timeout
+
+        logger = logging.getLogger('SyslogLogger')
+        logger.setLevel(logging.INFO)
+        logging_system("Honeypot Start. {0}:{1} at {2}".format(ip, port, get_time()), False, False)
         myServer.serve_forever()
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        logging_system(f"Server startup failed: {e}", True, True)
 
-    # Server close
-    myServer.server_close()
+    try:
+        myServer.server_close()
+    except Exception:
+        pass
 
 #------------------------------------------------
 # if __name__ == '__main__'
@@ -662,6 +709,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     port = args.port
+    ensure_runtime_modules()
     
     # Logfile paths
     if not os.path.exists(common_paths["logs"]):
@@ -676,9 +724,12 @@ if __name__ == '__main__':
 
     # Mapping dictionary
     mapping = {}
-    c.execute('select * from mapping_table')
-    for m in c.fetchall():
-        mapping[m[1]] = m[0]
+    try:
+        c.execute('select * from mapping_table')
+        for m in c.fetchall():
+            mapping[m[1]] = m[0]
+    except sqlite3.OperationalError:
+        mapping = {"<PAD>": 0, "<END>": 1, "<EMP>": 2}
 
     # Get the max value of response_id
     c.execute('select max(res_id) from response_table')

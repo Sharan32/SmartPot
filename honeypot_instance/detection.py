@@ -14,6 +14,9 @@ class AttackDetector:
 
     def __init__(self):
         self.sqli_patterns = [
+            r"(?i)\b(or|and)\b\s+['\"]?\d+['\"]?\s*=\s*['\"]?\d+['\"]?",
+            r"(?i)\b(or|and)\b\s+['\"][^'\"]+['\"]\s*=\s*['\"][^'\"]+['\"]",
+            r"(?i)\bunion\b.+\bselect\b",
             r"('|\"|;|\s)(\s)??(or|and)(\s)??('|\"|\d)",
             r"(\s)??(union|select|insert|update|delete|drop)(\s)??(from|into|table)",
             r"(--|\#|\/\*|\*\/)",
@@ -36,6 +39,7 @@ class AttackDetector:
             r"[;&|`$()]",
             r"\$\{",
             r"<\(",
+            r"(?i)\b(cat|wget|curl|nc|bash|sh)\b",
         ]
         self.brute_force_threshold = 5  # requests per session for brute force detection
         self.scanner_patterns = [
