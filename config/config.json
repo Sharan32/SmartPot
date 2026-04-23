@@ -1,0 +1,23 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "timeout": 5.0
+  },
+  "deception": {
+    "session_ttl_seconds": 3600,
+    "valid_user": "admin",
+    "fake_password": "password123"
+  },
+  "logs": {
+    "directory": "./logs/",
+    "json_log": "access_structured.json",
+    "text_log": "access.log"
+  },
+  "rl": {
+    "db_path": "./rl.db",
+    "epsilon": 0.1,
+    "discount_gamma": 0.99,
+    "learning_rate": 0.01
+  }
+}

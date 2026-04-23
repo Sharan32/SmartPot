@@ -1,0 +1,12 @@
+tensorflow
+numpy
+gensim
+flask
+selenium
+requests
+urllib3
+scikit-learn
+matplotlib
+pandas
+sqlite3
+werkzeug
