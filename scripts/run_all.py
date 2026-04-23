@@ -339,7 +339,7 @@ class HoneypotRunner:
 
         cmd = [
             "python3",
-            os.path.join(self.root_dir, "analyzer.py"),
+            os.path.join(self.root_dir, "core", "analyzer.py"),
             "--log-dir",
             os.path.join(self.honeypot_instance_dir, "logs"),
             "--honeypot-dir",
