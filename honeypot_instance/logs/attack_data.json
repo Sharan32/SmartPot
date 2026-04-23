@@ -1,0 +1,71 @@
+{
+  "total_requests": 4,
+  "total_attacks": 1,
+  "attack_type_distribution": {
+    "scanner": 1
+  },
+  "top_attacker_ips": {
+    "127.0.0.1": 4
+  },
+  "top_endpoints": {
+    "/health": 2,
+    "/": 1,
+    "/cgi-bin/luci": 1
+  },
+  "attack_frequency": {
+    "2026-04-23T12:43": 4
+  },
+  "sessions": {
+    "YGLF8yHFNZarH6z38noPZBDyhwVpdB9k": {
+      "ip": "127.0.0.1",
+      "request_count": 1,
+      "attack_count": 0,
+      "attack_types": {},
+      "endpoints": {
+        "/health": 1
+      },
+      "started_at": "2026-04-23T12:43:49.527347",
+      "last_seen": "2026-04-23T12:43:49.527347",
+      "duration_seconds": 0
+    },
+    "5SfgzIs4dn71tLngZPOrxVamWcGMSZTr": {
+      "ip": "127.0.0.1",
+      "request_count": 1,
+      "attack_count": 0,
+      "attack_types": {},
+      "endpoints": {
+        "/": 1
+      },
+      "started_at": "2026-04-23T12:43:49.622384",
+      "last_seen": "2026-04-23T12:43:49.622384",
+      "duration_seconds": 0
+    },
+    "YVtVe4pEM3BdE71BaMg9cPmXv44mZqKo": {
+      "ip": "127.0.0.1",
+      "request_count": 1,
+      "attack_count": 0,
+      "attack_types": {},
+      "endpoints": {
+        "/health": 1
+      },
+      "started_at": "2026-04-23T12:43:49.623840",
+      "last_seen": "2026-04-23T12:43:49.623840",
+      "duration_seconds": 0
+    },
+    "HgYkej2elJkIIE0LuVVxmotkxhwgT2Wf": {
+      "ip": "127.0.0.1",
+      "request_count": 1,
+      "attack_count": 1,
+      "attack_types": {
+        "scanner": 1
+      },
+      "endpoints": {
+        "/cgi-bin/luci": 1
+      },
+      "started_at": "2026-04-23T12:43:50.018340",
+      "last_seen": "2026-04-23T12:43:50.018340",
+      "duration_seconds": 0
+    }
+  },
+  "last_updated": "2026-04-23T12:43:50.018340"
+}
