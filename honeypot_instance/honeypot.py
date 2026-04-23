@@ -528,6 +528,15 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
             res_status = response_list[0]
             res_headers = response_list[1]
             res_body = response_list[2]
+
+            # Normalize invalid or unsupported response codes from the response DB
+            if not isinstance(res_status, int) or res_status < 100 or res_status > 599 or res_status == 599:
+                logging_system(
+                    f"Normalized invalid response status {res_status} for request {req_path} to default response.",
+                    False,
+                    False,
+                )
+                res_status, res_headers, res_body = get_default_response()
     
             # Response status            
             self.send_response(res_status)
