@@ -1,3 +1,0 @@
-/etc/modules-boot.d/35-usb-ehci
-/etc/modules.d/35-usb-ehci
-/lib/modules/6.12.74/ehci-hcd.ko

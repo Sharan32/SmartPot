@@ -1,3 +1,0 @@
-/etc/modules-boot.d/20-usb-common
-/etc/modules.d/20-usb-common
-/lib/modules/6.12.74/usb-common.ko

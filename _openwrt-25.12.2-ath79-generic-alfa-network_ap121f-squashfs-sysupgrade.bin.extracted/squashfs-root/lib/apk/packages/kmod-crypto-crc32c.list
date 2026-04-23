@@ -1,3 +1,0 @@
-/etc/modules-boot.d/04-crypto-crc32c
-/etc/modules.d/04-crypto-crc32c
-/lib/modules/6.12.74/crc32c_generic.ko

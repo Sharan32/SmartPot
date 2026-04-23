@@ -1,3 +1,0 @@
-/etc/modules-boot.d/39-usb-chipidea2
-/etc/modules.d/39-usb-chipidea2
-/lib/modules/6.12.74/ci_hdrc_usb2.ko

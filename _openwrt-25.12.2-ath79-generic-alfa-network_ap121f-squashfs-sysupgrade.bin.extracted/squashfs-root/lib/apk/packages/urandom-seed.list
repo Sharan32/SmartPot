@@ -1,3 +1,0 @@
-/etc/init.d/urandom_seed
-/lib/preinit/81_urandom_seed
-/sbin/urandom_seed

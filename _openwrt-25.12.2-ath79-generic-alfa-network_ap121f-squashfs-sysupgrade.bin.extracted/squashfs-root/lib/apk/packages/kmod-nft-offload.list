@@ -1,3 +1,0 @@
-/etc/modules.d/nft-offload
-/lib/modules/6.12.74/nf_flow_table_inet.ko
-/lib/modules/6.12.74/nft_flow_offload.ko

@@ -1,5 +1,0 @@
-/etc/modules.conf
-/lib/apk/packages/ubox.alternatives
-/lib/libvalidate.so
-/sbin/kmodloader
-/sbin/validate_data

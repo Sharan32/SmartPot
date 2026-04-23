@@ -1,3 +1,0 @@
-/etc/modules-boot.d/21-usb-phy-nop
-/etc/modules.d/21-usb-phy-nop
-/lib/modules/6.12.74/phy-generic.ko

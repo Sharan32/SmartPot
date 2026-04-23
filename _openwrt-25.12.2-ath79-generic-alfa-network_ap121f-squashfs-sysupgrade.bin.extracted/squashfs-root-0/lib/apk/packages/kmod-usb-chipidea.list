@@ -1,4 +1,0 @@
-/etc/modules-boot.d/39-usb-chipidea
-/etc/modules.d/39-usb-chipidea
-/lib/modules/6.12.74/ci_hdrc.ko
-/lib/modules/6.12.74/ulpi.ko

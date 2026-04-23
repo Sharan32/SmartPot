@@ -1,3 +1,0 @@
-/etc/modules-boot.d/usb-storage
-/etc/modules.d/usb-storage
-/lib/modules/6.12.74/usb-storage.ko
