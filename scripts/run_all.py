@@ -48,6 +48,90 @@ class HoneypotRunner:
         self.start_time = datetime.now()
         self.dashboard_port = 5000
 
+    def _detect_binwalk_version(self):
+        """Return binwalk version string if available."""
+        if not shutil.which("binwalk"):
+            return None
+
+        try:
+            version_output = subprocess.check_output(
+                ["binwalk", "--version"],
+                text=True,
+                stderr=subprocess.STDOUT,
+            ).strip()
+        except Exception:
+            return "unknown"
+
+        if not version_output:
+            return "unknown"
+
+        return version_output.splitlines()[0].strip()
+
+    def _qemu_static_binaries(self):
+        """Return installed qemu user-static binaries found on PATH."""
+        common_qemu_bins = [
+            "qemu-arm-static",
+            "qemu-aarch64-static",
+            "qemu-mips-static",
+            "qemu-mipsel-static",
+            "qemu-i386-static",
+            "qemu-x86_64-static",
+        ]
+        found = []
+        for binary in common_qemu_bins:
+            if shutil.which(binary):
+                found.append(binary)
+        return found
+
+    def check_host_dependencies(self) -> bool:
+        """Verify required host tools are available before generating the honeypot."""
+        self.step(1, "Verify Host Dependencies")
+
+        missing = []
+
+        binwalk_version = self._detect_binwalk_version()
+        if binwalk_version:
+            self.log(f"✓ binwalk found ({binwalk_version})", "SUCCESS")
+            if binwalk_version != "unknown" and "2.2." not in binwalk_version:
+                self.log(
+                    "README recommends binwalk 2.2.x or earlier for firmware extraction",
+                    "WARNING",
+                )
+        else:
+            self.log("✗ binwalk not found on PATH", "ERROR", True)
+            self.log(
+                "Install a CLI binwalk release. This repo expects binwalk 2.2.x or earlier.",
+                "ERROR",
+                True,
+            )
+            missing.append("binwalk")
+
+        docker_path = shutil.which("docker")
+        if docker_path:
+            self.log(f"✓ docker found ({docker_path})", "SUCCESS")
+        else:
+            self.log("✗ docker not found on PATH", "ERROR", True)
+            self.log("Install Docker Engine/CLI before running the pipeline.", "ERROR", True)
+            missing.append("docker")
+
+        qemu_bins = self._qemu_static_binaries()
+        if qemu_bins:
+            self.log(f"✓ QEMU user-static binaries found: {', '.join(qemu_bins)}", "SUCCESS")
+        else:
+            self.log("✗ No qemu-*-static user emulator found on PATH", "ERROR", True)
+            self.log(
+                "Install qemu-user-static so booter.py can copy the correct emulator into the firmware rootfs.",
+                "ERROR",
+                True,
+            )
+            missing.append("qemu-user-static")
+
+        if missing:
+            self.log(f"Missing host dependencies: {', '.join(missing)}", "ERROR", True)
+            return False
+
+        return True
+
     def log(self, message: str, level: str = "INFO", is_error: bool = False):
         """Print and log message"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -88,7 +172,7 @@ class HoneypotRunner:
 
     def run_auto_generation(self) -> bool:
         """Run auto.py to generate honeypot"""
-        self.step(1, "Generate Honeypot from Firmware (auto.py)")
+        self.step(2, "Generate Honeypot from Firmware (auto.py)")
 
         self.stop_existing_background_services()
 
@@ -188,7 +272,7 @@ class HoneypotRunner:
 
     def verify_honeypot_instance(self) -> bool:
         """Verify honeypot_instance/ was created correctly"""
-        self.step(2, "Verify Honeypot Instance Created")
+        self.step(3, "Verify Honeypot Instance Created")
 
         if not os.path.isdir(self.honeypot_instance_dir):
             self.log(
@@ -254,9 +338,9 @@ class HoneypotRunner:
         startup_wait: int = 5,
     ) -> bool:
         """Start honeypot server"""
-        self.step(3, "Start Honeypot Server")
+        self.step(4, "Start Honeypot Server")
 
-        cmd = ["python3", "honeypot.py"]
+        cmd = ["python3", os.path.join(self.root_dir, "core", "honeypot.py")]
         if os.path.exists(os.path.join(self.honeypot_instance_dir, "word2vec.bin")):
             cmd.append("-m")
 
@@ -447,26 +531,30 @@ class HoneypotRunner:
         if not self.check_firmware():
             return False
 
-        # Step 2: Generate honeypot
+        # Step 2: Verify host dependencies
+        if not self.check_host_dependencies():
+            return False
+
+        # Step 3: Generate honeypot
         if not self.run_auto_generation():
             return False
 
-        # Step 3: Verify honeypot instance
+        # Step 4: Verify honeypot instance
         if not self.verify_honeypot_instance():
             return False
 
-        # Step 4: Start server
+        # Step 5: Start server
         if not self.start_honeypot_server(
             background=background_server,
             startup_wait=startup_wait,
         ):
             return False
 
-        # Step 5: Start analytics dashboard
+        # Step 6: Start analytics dashboard
         if not self.start_dashboard(startup_wait=3 if background_server else 5):
             return False
 
-        # Step 6: Summary and RL check
+        # Step 7: Summary and RL check
         self.print_summary()
         # Note: RL verification would happen after server runs
         # For now, just suggest where to find it

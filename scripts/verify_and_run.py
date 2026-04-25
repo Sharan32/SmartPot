@@ -25,6 +25,7 @@ import json
 import sqlite3
 import urllib.request
 import urllib.error
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -103,6 +104,90 @@ class FirmPotVerifier:
         self.checks_passed = 0
         self.checks_failed = 0
 
+    def _detect_binwalk_version(self):
+        """Return binwalk version string if available."""
+        binwalk_path = shutil.which("binwalk")
+        if not binwalk_path:
+            return None
+
+        try:
+            version_output = subprocess.check_output(
+                ["binwalk", "--version"],
+                text=True,
+                stderr=subprocess.STDOUT,
+            ).strip()
+        except Exception:
+            return "unknown"
+
+        if not version_output:
+            return "unknown"
+
+        return version_output.splitlines()[0].strip()
+
+    def _qemu_static_binaries(self):
+        """Return installed qemu user-static binaries found on PATH."""
+        common_qemu_bins = [
+            "qemu-arm-static",
+            "qemu-aarch64-static",
+            "qemu-mips-static",
+            "qemu-mipsel-static",
+            "qemu-i386-static",
+            "qemu-x86_64-static",
+        ]
+        found = []
+        for binary in common_qemu_bins:
+            if shutil.which(binary):
+                found.append(binary)
+        return found
+
+    def step_check_host_dependencies(self):
+        """Verify required host tools exist before launching the pipeline."""
+        separator("STEP 2: Verify Host Dependencies")
+
+        missing = []
+
+        binwalk_version = self._detect_binwalk_version()
+        if binwalk_version:
+            print(success(f"binwalk found ({binwalk_version})"))
+            self.checks_passed += 1
+
+            if binwalk_version != "unknown" and "2.2." not in binwalk_version:
+                print(warning("README recommends binwalk 2.2.x or earlier for filesystem extraction"))
+        else:
+            print(failure("binwalk not found on PATH"))
+            print("  Install a CLI binwalk release. This repo expects binwalk 2.2.x or earlier.")
+            missing.append("binwalk")
+            self.checks_failed += 1
+
+        docker_path = shutil.which("docker")
+        if docker_path:
+            print(success(f"docker found ({docker_path})"))
+            self.checks_passed += 1
+        else:
+            print(failure("docker not found on PATH"))
+            print("  Install Docker Engine/CLI before running the firmware pipeline.")
+            missing.append("docker")
+            self.checks_failed += 1
+
+        qemu_bins = self._qemu_static_binaries()
+        if qemu_bins:
+            print(success(f"QEMU user-static binaries found: {', '.join(qemu_bins)}"))
+            self.checks_passed += 1
+        else:
+            print(failure("No qemu-*-static user emulator found on PATH"))
+            print("  Install qemu-user-static so booter.py can copy the right emulator into the extracted firmware.")
+            missing.append("qemu-user-static")
+            self.checks_failed += 1
+
+        if missing:
+            self.results["host_dependencies_ok"] = False
+            print()
+            print("Missing host dependencies: " + ", ".join(missing))
+            return False
+
+        self.results["host_dependencies_ok"] = True
+        return True
+
     # ========================================================================
     # STEP 1: VALIDATE INPUT
     # ========================================================================
@@ -135,7 +220,7 @@ class FirmPotVerifier:
 
     def step_run_pipeline(self):
         """Execute run_all.py with firmware"""
-        separator("STEP 2: Run Full FirmPot Pipeline")
+        separator("STEP 3: Run Full FirmPot Pipeline")
         print(f"Starting pipeline at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
         cmd = [
@@ -462,6 +547,7 @@ class FirmPotVerifier:
         # Checklist
         checks = [
             ("Firmware processed", self.results.get("firmware_validated", False)),
+            ("Host dependencies available", self.results.get("host_dependencies_ok", False)),
             ("Pipeline executed", self.results.get("pipeline_executed", False)),
             ("Honeypot instance created", self.results.get("outputs_verified", False)),
             ("Honeypot health endpoint working", self.results.get("honeypot_health", False)),
@@ -514,6 +600,10 @@ class FirmPotVerifier:
         # Execute steps
         if not self.step_validate_input():
             print(failure("Input validation failed"))
+            return False
+
+        if not self.step_check_host_dependencies():
+            print(failure("Host dependency verification failed"))
             return False
 
         if not self.step_run_pipeline():

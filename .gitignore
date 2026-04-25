@@ -88,4 +88,4 @@ static/data.json
 # Temporary / cache
 # =========================
 *.pid
-*.cache
+*.cachesimstring/

@@ -256,6 +256,42 @@ def get_default_response():
     return 200, headers, body
 
 
+def get_usable_response(cursor, res_id):
+    """Return a real HTTP response row, ignoring scanner sentinel status 599."""
+    try:
+        cursor.execute(
+            'select res_status, res_headers, res_body from response_table where res_id = ?',
+            (res_id,),
+        )
+        response_row = cursor.fetchone()
+    except Exception:
+        response_row = None
+
+    if response_row is not None and response_row[0] != 599:
+        return response_row
+
+    try:
+        cursor.execute(
+            '''
+            select res_status, res_headers, res_body
+            from response_table
+            where res_status between 200 and 499
+            order by
+                case when res_status = 200 then 0 else 1 end,
+                length(res_body) desc
+            limit 1
+            '''
+        )
+        fallback_row = cursor.fetchone()
+    except Exception:
+        fallback_row = None
+
+    if fallback_row is not None:
+        return fallback_row
+
+    return get_default_response()
+
+
 def ensure_runtime_modules():
     """Copy support modules into the generated instance if they are missing."""
     required_files = [
@@ -522,17 +558,7 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
             # Parse a Response
             #------------------------------------
 
-            try:
-                c.execute('select res_status, res_headers, res_body from response_table where res_id = ?', (res_id,))
-                response_list = c.fetchone()
-            except Exception:
-                response_list = None
-
-            if response_list is None:
-                c.execute('select res_status, res_headers, res_body from response_table where res_id = 1')
-                response_list = c.fetchone()
-            if response_list is None:
-                response_list = get_default_response()
+            response_list = get_usable_response(c, res_id)
     
             res_status = response_list[0]
             res_headers = response_list[1]

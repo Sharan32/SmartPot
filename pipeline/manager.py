@@ -47,26 +47,30 @@ def prepare_honeypot(local_path):
 		shutil.copy(src, dst)
 
 	# Copy the response.db
-	response_src = os.path.join(common_paths["directory"], common_paths["response_db"])
-	shutil.copy(response_src, local_path)
+	honeypot_dir = os.path.join(repo_root, "honeypot")
+	response_src = os.path.join(honeypot_dir, "response.db")
+	if os.path.exists(response_src):
+		shutil.copy(response_src, local_path)
+	else:
+		print("[!] response.db not found in honeypot/. Creating honeypot instance without it.")
 
 	# Copy the checkpoints of model
-	checkpoint_dir = os.path.join(common_paths["directory"], common_paths["checkpoints"])
-	os.makedirs(os.path.join(local_path, common_paths["checkpoints"]), exist_ok=True)
+	checkpoint_dir = os.path.join(honeypot_dir, "checkpoints")
+	os.makedirs(os.path.join(local_path, "checkpoints"), exist_ok=True)
 	checkpoint_file = os.path.join(checkpoint_dir, "checkpoint")
 	if os.path.exists(checkpoint_file):
 		with open(checkpoint_file, "r") as f:
 			lines = f.readlines()
 		ckpt = lines[-1].split(" ")[-1].strip()
-		shutil.copy(checkpoint_file, os.path.join(local_path, common_paths["checkpoints"], "checkpoint"))
+		shutil.copy(checkpoint_file, os.path.join(local_path, "checkpoints", "checkpoint"))
 		for fname in os.listdir(checkpoint_dir):
 			if ckpt in fname:
-				shutil.copy(os.path.join(checkpoint_dir, fname), os.path.join(local_path, common_paths["checkpoints"], fname))
+				shutil.copy(os.path.join(checkpoint_dir, fname), os.path.join(local_path, "checkpoints", fname))
 	else:
 		print("[!] No trained checkpoints found. Creating honeypot instance without model checkpoints.")
 
 	# Copy the word2vec.bin
-	word2vec_path = os.path.join(common_paths["directory"], common_paths["word2vec"])
+	word2vec_path = os.path.join(honeypot_dir, "word2vec.bin")
 	if os.path.exists(word2vec_path):
 		shutil.copy(word2vec_path, local_path)
 	else:

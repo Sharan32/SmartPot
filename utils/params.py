@@ -4,26 +4,26 @@
 #------------------------------------------------
 
 common_paths = {}
-common_paths["directory"] = "./honeypot/"
+common_paths["directory"] = "./core/"  # Core modules location
 common_paths["instance"] = "./honeypot_instance/"
 
 common_paths["learning_db"] = "./learning.db"
-common_paths["response_db"] = "./response.db"
-common_paths["word2vec"] = "./word2vec.bin"
+common_paths["response_db"] = "./response.db"  # Relative to honeypot_instance dir
+common_paths["word2vec"] = "./word2vec.bin"  # Relative to honeypot_instance dir
 common_paths["word2vec_plot"] = "./word2vec.png"
-common_paths["checkpoints"] = "./checkpoints/"
+common_paths["checkpoints"] = "./checkpoints/"  # Relative to honeypot_instance dir
 
-common_paths["logs"] = "./logs/"
+common_paths["logs"] = "./logs/"  # Relative to honeypot_instance dir
 common_paths["selenium_log"] = "./selenium.log"
-common_paths["access_log"] = "./access.log"
-common_paths["honeypot_log"] = "./honeypot.log"
+common_paths["access_log"] = "./logs/access.log"  # Relative to honeypot_instance dir
+common_paths["honeypot_log"] = "./logs/honeypot.log"  # Relative to honeypot_instance dir
 
 #------------------------------------------------
 # Booting Parameters
 #------------------------------------------------
 
 boot_params = {}
-boot_params["filesystem"] = "./extracted_fs/"
+boot_params["filesystem"] = "./extracted_fs/"  # Updated path
 boot_params["startup"] = "./startup.sh"
 
 # Configuration for docker containers
@@ -44,7 +44,7 @@ docker_config["subnet_mask"] = "/16" # subnet of the Docker network
 scan_params = {}
 
 scan_params["password"] = "password"
-scan_params["www_dirname"] = "./www/"
+scan_params["www_dirname"] = "./www/"  # Updated path
 scan_params["timer"] = 3
 scan_params["header_num"] = 50
 
