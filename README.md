@@ -1,222 +1,232 @@
-# FirmPot
+# SmartPot / FirmPot
 
-## About FirmPot
-FirmPot is a framework for the automatic generation of Intelligent-Interaction honeypots using OpenWrt-based firmware.
-We presented FirmPot at CANDAR WICS 2021.
+SmartPot is a Python-based workflow for turning OpenWrt firmware into an interactive honeypot. The repository includes:
 
-## Testing Environment
-- OS: Ubuntu 20.04.2 LTS
-- Kernel: Linux 5.8.0-48-generic x86_64
-- CPU: Intel Core i7-10700K CPU@3.80GHz
-- GPU: GeForce RTX 3060
+- firmware boot and extraction helpers
+- web UI scanning and request/response capture
+- training for the response model
+- honeypot instance generation
+- a lightweight analytics dashboard
+- end-to-end runner and verification scripts
 
-## Files and Directories
-```
-FirmPot/
-├── auto.py : Automatically generate a honeypot.
-├── booter.py : Boot an embedded application from a firmware image
-├── scanner.py : Scan the web application
-├── learner.py : Learn the web interaction
-├── manager.py : Create and manage the honeypot instance
-├── honeypot.py : Program of honeypot server
-├── analyzer.py : Analyze access logs observed honeypots 
-├── setup.sh : Install required tools
-├── honeypot_setup.sh : Install required tools for operation of honeypots
-├── qemu-binfmt-conf.sh : Script to register configuration of binfmt_misc
-├── README.md 
-├── utils/ : Modules required by each program
-├── images/ : Location of firmware images
-├── tools/ : Tools required by each program
-├── assets/ : Files used for visualization of log analysis
-├── static/ : Files used for visualization of log analysis
-├── templates/ : Files used for visualization of log analysis
-└── demo/ : Demonstrations of honeypot generation by FirmPot
-```
+The main entry points are:
 
-## Setup 
-1. Clone this repository
-```
-$ git clone https://github.com/SaitoLab-Nitech/FirmPot.git 
-```
-2. Run `./setup.sh` script (require `sudo` password)
-:::info
-- Please comment out any tools that are already installed on your host
-- If you get a comment, `[-] Linux kernel may not specify support for binfmt_misc.`, your kernel is not compatible with our programs
-:::
+- `scripts/verify_and_run.py`: full pipeline plus startup verification
+- `scripts/run_all.py`: full pipeline runner without the extra verification summary
+- `pipeline/scanner.py`: scanner/fuzzer stage
+- `pipeline/learner.py`: model training stage
+- `pipeline/manager.py --create`: assemble `honeypot_instance/`
 
-## Preparetion
-1. Download a firmware image from a vendor's website
-2. Put the firmware image into `./images` directory
-:::info
-Our framework supports **OpenWrt** based firmware images. Please check your images before using our framework.
-:::
+## Supported Environment
 
-## Usage
-There are two patterns:
-1. Generate a honeypot automatically
-2. Generate a honeypot while checking each process
-    - We prepare two demos : [demo1](./demo/demo1/demo1.md), [demo2](./demo/demo2/demo2.md)
+Recommended host environment:
 
-### (Pattern 1) Generate a honeypot automatically./demo/demo1/demo1.md
-1. Run `auto.py`
-```
-$ python3 auto.py <firmware image>
-```
-A honeypot instance (default: `./honeypot_instance/`) will be created.
+- Ubuntu 20.04 or similar Linux distribution
+- Python `3.8.x`
+- Docker available to the current user
 
-2. Put the directory (`./honeypot_instance/`) on a public server
-3. Go to the created directory of honeypot instance and launch the honeypot server
-```
-$ cd ./honeypot_instance/
-$ sudo python3 honeypot.py or python3 honeypot.py -m
-```
-### (Pattern 2) Generate a honeypot while checking each process
-1. Run `booter.py`
-```
-$ python3 booter.py <firmware images>
-```
-Multiple containers can be prepared by adding the `-c <number>` option. 
-However, it may overload the host machine. 
-`booter.py` will prompt you for the sudo password during execution.
+This project currently targets Python 3.8 because the tested TensorFlow stack is pinned to `tensorflow==2.13.1`.
 
-2. Run `scanner.py`
-```
-$ python3 scanner.py -i <container's IPaddress>
-```
-3. Run `learner.py`
-```
-$ python3 learner.py
-```
-4. Run `manager.py`
-```
-$ python3 manager.py --create
-```
-5. Go to the created directory of honeypot instance (default: `./honeypot_instance/`) and launch the honeypot server
-```
-$ cd ./honeypot_instance/
-$ python3 honeypot.py (or python3 honeypot.py -m)
+## System Dependencies
+
+Install the required host packages before creating the virtual environment:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  python3.8 python3.8-venv python3-dev build-essential \
+  binwalk docker.io qemu-user-static file lsof iproute2 \
+  firefox geckodriver
 ```
 
-## Log Analyze
-Deployed honeypots will log access to them in the file (default: `./logs/access.log`).
-The access log are visualized by running `analyzer.py`.
-1. Run `analyzer.py`
-```
-$ python3 analyzer.py access1.log access2.log access3.log ...
-```
-2. Access to http://localhost:8050
+Notes:
 
-## FAQ
-### Failed to extract filesystem in `booter.py`.
-Follow the checklist below to determine the cause.
-1. The firmware may have been compressed in several layers. Try using the "unzip" or "untar" command to uncompress the file.
-2. Try running booter.py with the `-m` option to recursively retrieve the file system.
-3. Please check the version of binwalk. Make sure that binwalk is 2.2.* or earlier.
-4. Please check that the firmware name does not contain any single-byte spaces. If the firmware name contains spaces, the program will not recognize it.
+- `binwalk` is required for firmware extraction. The original project documentation recommends `binwalk 2.2.x` for best compatibility.
+- `docker` and `qemu-user-static` are required for emulating the extracted firmware.
+- `firefox` and `geckodriver` are only required for Selenium-based crawling. If you use `pipeline/scanner.py --requests-only`, browser automation is skipped.
+- The repository vendors a lightweight `simstring` compatibility package, so no separate `simstring` pip install is required.
 
-### Failed to launch the web application in `booter.py`.
-The following checklist may help you solve this problem.
-#### 1. Make sure you have configured binfmt_misc correctly
-```
-$ sudo su -
-# cat /proc/sys/fs/binfmt_misc/qemu-(arch)
-```
-In additions, binfmt_misc can be used even after rebooting the host with the following configuration.
+Enable Docker after installation:
 
-1. Move the `qemu-binfmt-conf.sh` in this repository to `/usr/local/bin/`
-```
-$ sudo chmod +x qemu-binfmt-conf.sh
-$ sudo mv qemu-binfmt-conf.sh /usr/local/bin/qemu-binfmt-conf.sh
-```
-2. Create `/usr/local/bin/register.sh` and write the following
-```
-#!/bin/sh
-QEMU_BIN_DIR=${QEMU_BIN_DIR:-/usr/bin}
-if [ ! -d /proc/sys/fs/binfmt_misc ]; then
-    echo "No binfmt support in the kernel."
-    echo "  Try: '/sbin/modprobe binfmt_misc' from the host"
-    exit 1
-fi
-if [ ! -f /proc/sys/fs/binfmt_misc/register ]; then
-    mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc
-fi
-if [ "${1}" = "--reset" ]; then
-    shift
-    find /proc/sys/fs/binfmt_misc -type f -name 'qemu-*' -exec sh -c 'echo -1 > {}' \;
-fi
-exec /usr/local/bin/qemu-binfmt-conf.sh --qemu-suffix "-static" --qemu-path "${QEMU_BIN_DIR}" $@
-```
-3. Change the permission
-```
-$ sudo chmod +x /usr/local/bin/register.sh
-```
-4. Create `/etc/systemd/system/register.service` and write the following
-```
-[Unit]
-Description= register cpu emulator
-[Service]
-ExecStart = /usr/local/bin/register.sh
-Restart = no
-Type = simple
-RemainAfterExit=yes
-[Install]
-WantedBy = multi-user.target
+```bash
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
 ```
 
-5. Start the daemon
-```
-$ sudo systemctl daemon-reload
-$ sudo systemctl enable register.service
-$ sudo systemctl start register.service 
-$ sudo systemctl status register.service
-```
-:::info
-The openwrt MIPS firmware has a special magic number. If it fails to execute, please execute the following command.
-```
-$ sudo su -
-## ↓ This is MIPS little endian 
-# echo ':qemu-xmmipsel:M::\x7f\x45\x4c\x46\x01\x01\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x08\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-mipsel-static:' > /proc/sys/fs/binfmt_misc/register
+Log out and back in after adding your user to the `docker` group.
 
-## ↓ This is MIPS big endian 
-# echo ':qemu-xmmips:M::\x7f\x45\x4c\x46\x01\x02\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x08:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff:/usr/bin/qemu-mips-static:' > /proc/sys/fs/binfmt_misc/register
-```
-:::
+## Python Setup
 
-#### 2. There are some SSL-related failures, which can be resolved by tweaking the configuration file
-#### 3. Try to change the permissions of the extracted file system
-```
-$ sudo chmod -R 777　./extracted_fs 
-or
-$ sudo chmod -R 755 ./extracted_fs/bin ./extracted_fs/lib
-```
-#### 4. Possibility of QEMU's errors
-```
-$ sudo chroot extracted_fs/ /bin/busybox
-qemu: uncaught target signal 4 (Illegal instruction) - core dumped
-Illegal instruction
-```
-I'm sorry, our current framework does not support this.
+Create an isolated environment and install Python dependencies:
 
-#### 5. Possibility of Openwrt's errors or Luci's errors
-I'm sorry, our current framework does not support this.
-
-
-### Cannot login to the web application in `scanner.py`.
-- Some web applications may output a dialog before you enter your password. In this case, you have to turn off the dialog manually.
-- Normally, you will be asked to set a default password to login to the web. You can manually set a password in advance. Set the same password as the one written in the params file.
-
-### Cannot crawl the web application in `scanner.py`.
-- Two types of crawlers are available. Please use the flag to switch between them.
-```
-# line 119 in `scanner.py`
-atag_list, url_list, crawled_list = crawling(driver, ip, atag_list, url_list, crawled_list, flag=False) # <= If the crawling fails, try setting the flag to True
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
 ```
 
-### Learning model does not converge or learning model is unable to interact
-- Adjust the training parameters for both Seq2Seq and Word2Vec in `utils/params.py`.
-- The Word2Vec model can be created in advance using `utils/word2vec.py`. Please specify the word2vec model to `learner.py`.
+## Repository Layout
+
+Key directories:
+
+- [`scripts/`](scripts): user-facing entry points
+- [`pipeline/`](pipeline): firmware boot, scan, learn, and honeypot assembly steps
+- [`core/`](core): honeypot runtime, dashboard, RL, and metrics logic
+- [`utils/`](utils): shared utilities and data helpers
+- [`simstring/`](simstring): vendored compatibility shim used by the OOV logic
+- [`docs/`](docs): implementation notes
+
+Generated runtime artifacts such as databases, checkpoints, extracted filesystems, and `honeypot_instance/` are intentionally ignored by Git.
+
+## Running the Full Pipeline
+
+From the repository root:
+
+```bash
+source venv/bin/activate
+python3 scripts/verify_and_run.py /absolute/path/to/firmware.bin
 ```
-$ python3 utils/word2vec.py -l honeypot/learning.db
-# Generate word2vec.bin in ./honeypot/
-$ python3 learner.py -w honeypot/word2vec.bin
+
+Example:
+
+```bash
+python3 scripts/verify_and_run.py ./firmware/openwrt-firmware.bin
 ```
+
+What this does:
+
+1. validates the firmware path
+2. checks host dependencies
+3. runs the firmware-to-honeypot pipeline
+4. verifies generated outputs
+5. starts the honeypot and dashboard
+
+## Running the Pipeline Step by Step
+
+If you want to resume or debug the workflow manually:
+
+```bash
+source venv/bin/activate
+python3 pipeline/booter.py /absolute/path/to/firmware.bin
+python3 pipeline/scanner.py -i http://<container-ip>
+python3 pipeline/learner.py -d ./core/
+python3 pipeline/manager.py --create
+```
+
+Then start the generated honeypot from inside the runtime directory:
+
+```bash
+cd honeypot_instance
+python3 honeypot.py -m
+```
+
+The `-m` flag enables the Magnitude/OOV path when `word2vec.bin` is present.
+
+## Faster Iteration After Scanning
+
+Scanning and fuzzing are often the slowest stage. If `core/learning.db`, `core/response.db`, `core/word2vec.bin`, and `core/checkpoints/` already exist, you can resume from the post-scan stages:
+
+```bash
+source venv/bin/activate
+python3 pipeline/learner.py -d ./core/
+python3 pipeline/manager.py --create
+cd honeypot_instance
+python3 honeypot.py -m
+```
+
+## Dashboard
+
+Run the analytics dashboard in another terminal:
+
+```bash
+source venv/bin/activate
+python3 core/analyzer.py --log-dir honeypot_instance/logs --honeypot-dir honeypot_instance --port 5000
+```
+
+Useful URLs:
+
+- honeypot health: `http://127.0.0.1:8080/health`
+- dashboard: `http://127.0.0.1:5000/dashboard`
+- dashboard API: `http://127.0.0.1:5000/api/stats`
+
+## Browser Scanner Notes
+
+`pipeline/scanner.py` supports two modes:
+
+- Selenium-based crawling with Firefox
+- `--requests-only` mode for faster HTTP-only scanning
+
+Examples:
+
+```bash
+python3 pipeline/scanner.py -i http://172.20.0.2
+python3 pipeline/scanner.py --requests-only -i http://172.20.0.2
+```
+
+If the target login flow is unusual, check `utils/login.py` and the scanning parameters in [`utils/params.py`](utils/params.py).
+
+## Common Operational Notes
+
+- Run `honeypot.py` from inside `honeypot_instance/`, not from the repository root. The runtime uses relative paths for `response.db`, `word2vec.bin`, and `checkpoints/`.
+- If port `8080` is already in use, stop the previous honeypot process or start on another port with `python3 honeypot.py -m -p 8081`.
+- The project is Linux-first. Docker, QEMU user emulation, and firmware extraction are not expected to work on Windows without significant adaptation.
+
+## GitHub Readiness Notes
+
+This repository is configured to avoid committing:
+
+- virtual environments
+- extracted firmware trees
+- generated databases
+- trained checkpoints
+- logs and runtime files
+- large firmware images and binaries
+
+Before pushing, verify the working tree is clean:
+
+```bash
+git status
+```
+
+If you have old generated artifacts already tracked in your local branch, remove them from the index before your first push:
+
+```bash
+git rm --cached -r honeypot_instance extracted_fs _*.extracted core/checkpoints core/*.db core/word2vec.bin logs scripts/logs core/logs
+```
+
+## Troubleshooting
+
+### `binwalk: not found`
+
+Install the system package and verify it is on `PATH`:
+
+```bash
+sudo apt install -y binwalk
+binwalk --version
+```
+
+### `docker not found` or Docker permission errors
+
+Install Docker, start the service, and make sure your user is in the `docker` group.
+
+### `No such file or directory: response.db`
+
+Start the honeypot from `honeypot_instance/`, or rerun:
+
+```bash
+python3 pipeline/manager.py --create
+```
+
+### Scanner takes too long
+
+Use `--requests-only` or resume from the post-scan stages described above.
+
+## Suggested Next Cleanup
+
+The repository is now safe to publish, but these follow-up changes would make it even cleaner:
+
+- move historical material under `archive/` behind a clearer `legacy/` boundary
+- consolidate duplicated quickstart content from `QUICKSTART.md` into this README
+- move vendored `simstring/` sources into a dedicated `third_party/` directory
+- add a small `scripts/resume_after_scan.sh` helper for the post-scan workflow

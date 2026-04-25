@@ -1,91 +1,88 @@
-# =========================
-# Python basics
-# =========================
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
-# =========================
 # Virtual environments
-# =========================
 venv/
-.env
 .venv/
 env/
 ENV/
+.env
+.codex
 
-# =========================
-# Logs
-# =========================
-logs/*
-!logs/.gitkeep
+# Logs and runtime state
+logs/
+scripts/logs/
+core/logs/
+honeypot_instance/logs/
 *.log
+*.pid
 run_all.log
 
-# =========================
-# Databases / ML artifacts
-# =========================
+# Databases and generated ML artifacts
 *.db
-rl.db
-response.db
-learning.db
-rl_rewards.db
-
-# ML models / checkpoints
+*.sqlite
+*.sqlite3
 checkpoints/
-models/
+core/checkpoints/
+honeypot_instance/checkpoints/
 word2vec.bin
 word2vec.png
+rl.db
 
-# =========================
-# Firmware & large files
-# =========================
-*.img
-*.bin
-*.gz
-*.zip
-
-# Extracted / generated firmware data
-extracted_fs/
-_openwrt*
+# Generated honeypot/runtime directories
 honeypot_instance/
-
-# =========================
-# Honeypot runtime data
-# =========================
 honeypot/*
 !honeypot/.gitkeep
+data/honeypot/*
+!data/honeypot/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
 
-# =========================
-# OS / Editor junk
-# =========================
+# Firmware images, extracted filesystems, and large generated binaries
+*.bin
+*.img
+*.squashfs
+*.7z
+*.gz
+*.zip
+*.tar
+*.tar.gz
+extracted_fs/
+_*.extracted/
+
+# Browser / local tooling output
+selenium.log
+geckodriver.log
+
+# Vendored build artifacts
+simstring/autom4te.cache/
+simstring/**/*.o
+simstring/**/.deps/
+simstring/frontend/simstring
+simstring/sample/sample
+simstring/sample/sample_unicode
+simstring/config.log
+simstring/config.status
+simstring/stamp-h1
+
+# OS and editor files
 .DS_Store
 Thumbs.db
-
-# =========================
-# Build / packaging
-# =========================
+.idea/
+.vscode/
 build/
 dist/
-*.egg-info/
-
-# =========================
-# Jupyter / misc
-# =========================
-.ipynb_checkpoints/
-
-# =========================
-# Project-specific extras
-# =========================
 GeoLiteCity-data/
 utils/files/GeoLiteCity.dat
-images/
-static/data.json
 
-# =========================
-# Temporary / cache
-# =========================
-*.pid
-*.cachesimstring/
+# Preserve intentional placeholders
+!data/honeypot/.gitkeep
+!data/logs/.gitkeep
+!honeypot/.gitkeep
