@@ -46,6 +46,11 @@ class AttackDetector:
             r"nikto|nmap|masscan|sqlmap|metasploit|burp|zaproxy|acunetix",
             r"nessus|openvas|qualys",
         ]
+        self.path_attack_map = {
+            "config_exposure": ["/.git", "/config", "/env", "/web-inf", "/wp-config", "/.svn"],
+            "key_exfiltration": ["/id_rsa", ".key", ".pem", ".p12", ".pfx", "authorized_keys"],
+            "web_probe": ["/phpinfo", "/adminer", "/server-status", "/actuator", "/debug", "/solr"],
+        }
 
         self.ip_failed_logins = {}  # Track failed logins per IP
         self.ip_request_count = {}  # Track request count per IP
@@ -98,6 +103,12 @@ class AttackDetector:
             tags.append("scanner")
             confidence = 0.95
 
+        # Path-based probe classification
+        path_tag = self._classify_path_probe(path)
+        if path_tag:
+            tags.append(path_tag)
+            confidence = max(confidence, 0.85)
+
         # Brute force/credential stuffing detection
         if path == "/login" and method == "POST":
             if client_ip not in self.ip_failed_logins:
@@ -112,8 +123,8 @@ class AttackDetector:
             self.ip_request_count[client_ip] = 0
         self.ip_request_count[client_ip] += 1
         if self.ip_request_count[client_ip] > 50:  # More than 50 requests
-            if "scanner" not in tags:
-                tags.append("high_frequency")
+            if "scanner" not in tags and path_tag is None:
+                tags.append("scanner")
             confidence = max(confidence, 0.7)
 
         if not tags:
@@ -161,6 +172,14 @@ class AttackDetector:
             if re.search(pattern, user_agent, re.IGNORECASE):
                 return True
         return False
+
+    def _classify_path_probe(self, path: str) -> str:
+        path_lower = (path or "").lower()
+        for tag, indicators in self.path_attack_map.items():
+            for indicator in indicators:
+                if indicator in path_lower:
+                    return tag
+        return ""
 
     def reset_ip_stats(self, client_ip: str):
         """Reset stats for an IP (e.g., on new session)"""

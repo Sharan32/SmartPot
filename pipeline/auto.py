@@ -39,6 +39,7 @@ def main():
         sys.exit(1)
 
     # [2] Scanner
+    dataset_path = os.path.join(common_paths["directory"], common_paths["fuzz_dataset"])
     ip_list = []
     for i in range(container_num):
         container_name =  docker_config["container_name"] + str(i)
@@ -51,14 +52,22 @@ def main():
 
 
     if len(ip_list) > 0:
-        print("[*] Run scanner.py")
-        scanner_result = subprocess.run(
-            ["python3", "pipeline/scanner.py", "--requests-only", "-i"] + ["http://" + ip for ip in ip_list],
-            env=env
-        )
-        if scanner_result.returncode != 0:
-            print(f"[-] scanner.py failed with exit code {scanner_result.returncode}.")
-            sys.exit(1)
+        if args.reuse_data and os.path.exists(dataset_path):
+            print("[*] Reusing cached fuzz dataset :", dataset_path)
+        else:
+            print("[*] Run scanner.py")
+            scanner_cmd = [
+                "python3",
+                "pipeline/scanner.py",
+                "--requests-only",
+                "--dataset-out",
+                dataset_path,
+                "-i",
+            ] + ["http://" + ip for ip in ip_list]
+            scanner_result = subprocess.run(scanner_cmd, env=env)
+            if scanner_result.returncode != 0:
+                print(f"[-] scanner.py failed with exit code {scanner_result.returncode}.")
+                sys.exit(1)
         #subprocess.run(["python3", "scanner.py", "-i"] + ["https://" + ip for ip in ip_list])
     else:
         print("[-] booter.py failed.")
@@ -66,7 +75,12 @@ def main():
 
     # [3] Learner
     print("[*] Run learner.py")
-    learner_result = subprocess.run(["python3", "pipeline/learner.py"], env=env)
+    learner_cmd = ["python3", "pipeline/learner.py"]
+    if args.reuse_data:
+        learner_cmd.append("--reuse-data")
+    if args.retrain:
+        learner_cmd.append("--retrain")
+    learner_result = subprocess.run(learner_cmd, env=env)
     if learner_result.returncode != 0:
         print(f"[-] learner.py failed with exit code {learner_result.returncode}.")
         sys.exit(1)
@@ -91,6 +105,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Automatically generate a honeypot.')
     parser.add_argument('firmware', help="Specify the path to the firmware image.")
     parser.add_argument('-c', '--containers', default=1, type=int, help="Specify the number of containers to be launched, or 0 if you don't want to launch any (default: 1).")
+    parser.add_argument('--reuse-data', action='store_true', help='Reuse a previously saved fuzz dataset instead of re-running scanner.py when possible.')
+    parser.add_argument('--retrain', action='store_true', help='Force retraining cached artifacts such as word2vec embeddings.')
     args = parser.parse_args()
 
     # ----- Check Arguments -----

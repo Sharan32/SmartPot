@@ -143,6 +143,10 @@ def get_similar_idx(req):
 
     return mapping[simular_str]
 
+
+def get_unk_idx():
+    return mapping.get("<UNK>", mapping.get("<EMP>", 0))
+
 def string_to_int(request_list, is_magnitude=False):
 
     idx_list = []
@@ -153,15 +157,12 @@ def string_to_int(request_list, is_magnitude=False):
             try:
                 idx_list.append(mapping[req])
             except:
-                idx_list.append(0)
+                idx_list.append(get_unk_idx())
                 oov_list.append((i, req))
                 
     else:
         for i, req in enumerate(request_list):
-            try:
-                idx_list.append(mapping[req])
-            except:
-                idx_list.append(get_similar_idx(req))
+            idx_list.append(mapping.get(req, get_unk_idx()))
 
 
     return idx_list, oov_list
@@ -200,6 +201,24 @@ def predict(idx_list, oov_list=None, moov=None, k=1):
             dec_input = tf.expand_dims([result[0]], 0)
 
     return result
+
+
+def safe_predict_candidates(request_list, is_magnitude=False, moov=None, k=3):
+    """Predict candidate response ids without breaking the request pipeline."""
+    try:
+        if is_magnitude:
+            idx_list, oov_list = string_to_int(request_list, is_magnitude=True)
+            print("[*] idx List :", idx_list)
+            if len(oov_list) == 0:
+                return predict(idx_list, k=k)
+            return predict(idx_list, oov_list=oov_list, moov=moov, k=k)
+
+        idx_list, _ = string_to_int(request_list)
+        print("[*] idx List :", idx_list)
+        return predict(idx_list, k=k)
+    except Exception as e:
+        logging_system(f"Prediction failed: {e}, falling back to safe default", True, False)
+        return [0]
 
 #------------------------------------------------
 # Replace Function
@@ -566,18 +585,12 @@ class HoneypotRequestHandler(BaseHTTPRequestHandler):
             )
 
             try:
-                if is_magnitude:
-                    idx_list, oov_list = string_to_int(request_list, is_magnitude=True)
-                    print("[*] idx List :", idx_list)
-                    if len(oov_list) == 0:
-                        candidates = predict(idx_list, k=k)
-                    else:
-                        candidates = predict(idx_list, oov_list=oov_list, moov=moov, k=k)
-
-                else:
-                    idx_list, _ = string_to_int(request_list)
-                    print("[*] idx List :", idx_list)
-                    candidates = predict(idx_list, k=k)
+                candidates = safe_predict_candidates(
+                    request_list,
+                    is_magnitude=is_magnitude,
+                    moov=moov if is_magnitude else None,
+                    k=k,
+                )
             except Exception as e:
                 logging_system(f"Prediction failed: {e}, falling back to default", True, False)
                 candidates = [0]  # fallback
@@ -799,7 +812,9 @@ if __name__ == '__main__':
         for m in c.fetchall():
             mapping[m[1]] = m[0]
     except sqlite3.OperationalError:
-        mapping = {"<PAD>": 0, "<END>": 1, "<EMP>": 2}
+        mapping = {"<PAD>": 0, "<END>": 1, "<EMP>": 2, "<UNK>": 3}
+    if "<UNK>" not in mapping:
+        mapping["<UNK>"] = max(mapping.values(), default=2) + 1
 
     # Get the max value of response_id
     try:
@@ -821,9 +836,11 @@ if __name__ == '__main__':
     if is_magnitude:
         word2vec_path = common_paths["word2vec"]
         if not os.path.exists(word2vec_path):
-            print("[-] The word2vec path specified in the argument does not exist.")
-            sys.exit(1)
-        moov, encoder, decoder = get_model(word2vec_path)
+            print("[!] The word2vec path specified in the argument does not exist. Falling back to standard mode.")
+            is_magnitude = False
+            encoder, decoder = get_model()
+        else:
+            moov, encoder, decoder = get_model(word2vec_path)
     else:
         encoder, decoder = get_model()
 

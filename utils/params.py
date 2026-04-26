@@ -12,6 +12,9 @@ common_paths["response_db"] = "./response.db"  # Relative to honeypot_instance d
 common_paths["word2vec"] = "./word2vec.bin"  # Relative to honeypot_instance dir
 common_paths["word2vec_plot"] = "./word2vec.png"
 common_paths["checkpoints"] = "./checkpoints/"  # Relative to honeypot_instance dir
+common_paths["data_dir"] = "./data/"
+common_paths["fuzz_dataset"] = "./data/fuzz_dataset.json"
+common_paths["training_dataset"] = "./data/training_dataset.json"
 
 common_paths["logs"] = "./logs/"  # Relative to honeypot_instance dir
 common_paths["selenium_log"] = "./selenium.log"
@@ -47,6 +50,8 @@ scan_params["password"] = "password"
 scan_params["www_dirname"] = "./www/"  # Updated path
 scan_params["timer"] = 3
 scan_params["header_num"] = 10
+scan_params["max_endpoints"] = 25
+scan_params["max_workers"] = 8
 
 hardware_info = {
     "KERNELINFO": "(specify spec of kernel)",
@@ -62,11 +67,13 @@ train_params = {}
 train_params["batch_size"] = 512
 train_params["embed_size"] = 64
 train_params["hidden_size"] = 128
-train_params["epoch_num"] = 100
+train_params["epoch_num"] = 20
 train_params["max_input_len"] = 11 
+train_params["validation_split"] = 0.1
+train_params["early_stopping_patience"] = 3
 
 word2vec_params = {}
 word2vec_params["window"] = 10
-word2vec_params["min_count"] = 1
-word2vec_params["iter"] = 200
+word2vec_params["min_count"] = 2
+word2vec_params["iter"] = 50
 word2vec_params["workers"] = 5

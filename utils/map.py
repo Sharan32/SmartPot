@@ -20,7 +20,8 @@ class Mapping():
         self.mapping['<PAD>'] = 0
         self.mapping['<END>'] = 1
         self.mapping['<EMP>'] = 2
-        self.num = 3
+        self.mapping['<UNK>'] = 3
+        self.num = 4
 
         # Request
         c.execute('select req_method, req_path, req_query, req_headers, req_body from learning_table')
@@ -99,4 +100,3 @@ class Mapping():
             characters.append(self.reverse_mapping[i])
 
         return characters
-

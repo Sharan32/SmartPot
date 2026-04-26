@@ -36,6 +36,7 @@ from utils.login import *
 from utils.crawl import *
 from utils.mask import mask_str
 from utils.params import common_paths, scan_params, boot_params
+from utils.training_dataset import export_sqlite_training_set, save_samples
 
 #------------------------------------------------
 # Save to the Database
@@ -184,6 +185,21 @@ def seed_fallback_scan_targets(urllist):
             normalized.add(candidate)
             combined.append(candidate)
     return combined
+
+
+def limit_scan_targets(urllist):
+    """Cap the number of endpoints to keep scans reasonably fast."""
+    max_endpoints = scan_params.get("max_endpoints", 0)
+    if max_endpoints and len(urllist) > max_endpoints:
+        print("[*] Limiting scan targets to", max_endpoints, "endpoints for faster fuzzing")
+        return urllist[:max_endpoints]
+    return urllist
+
+
+def export_fuzz_dataset(dataset_path):
+    samples = export_sqlite_training_set(learning_db)
+    save_samples(dataset_path, samples)
+    print("[*] Saved fuzz dataset :", dataset_path, "(", len(samples), "samples )")
 
 #------------------------------------------------
 # Crawling with Selenium
@@ -404,6 +420,7 @@ def main():
 
     # Get all files from "www" in the local directory
     urllist = seed_fallback_scan_targets(find_cmd(fs_path + scan_params["www_dirname"]))
+    urllist = limit_scan_targets(urllist)
     
     print("[*] The number of all files :", len(urllist))
     
@@ -413,7 +430,7 @@ def main():
     elif container_num == 1:
         crawl_by_selenium(ip_list[0], driver, manual_time)
     else: 
-        tpe = ThreadPoolExecutor(max_workers=container_num)
+        tpe = ThreadPoolExecutor(max_workers=min(container_num, scan_params.get("max_workers", container_num)))
         for i in range(container_num):
             if i == 0: 
                 tpe.submit(crawl_by_selenium, ip_list[i]+login_page, driver, manual_time)
@@ -475,7 +492,7 @@ def main():
     print("[*] login res_id", res_id)       
     print("[*] Cookie", cookie)
     
-    tpe = ThreadPoolExecutor(max_workers=container_num)
+    tpe = ThreadPoolExecutor(max_workers=min(container_num, scan_params.get("max_workers", container_num)))
     
     if container_num == 1:
         header_fuzzing(ip_list[0], request_list, cookie)
@@ -521,6 +538,8 @@ def main():
     conn_rsp.commit()
     conn_rsp.close() 
 
+    export_fuzz_dataset(dataset_path)
+
     # Timer stop
     print("[*] Finish Time :", time.time() - start_time)
     
@@ -540,6 +559,7 @@ if __name__ == '__main__':
     parser.add_argument('--login-manual', action='store_true', help='The initial login is manually performed.')
     parser.add_argument('--headless', action='store_true', help='Hide the selenuim browser.')
     parser.add_argument('--requests-only', action='store_true', help='Disable selenium crawling and use requests-only scanning.')
+    parser.add_argument('--dataset-out', default="", help='Save fuzzing results to this dataset file. Defaults to the shared fuzz dataset cache.')
     parser.add_argument('-m', '--manual', type=int, default=0, help='If crawling is to be done manually, specify the number of seconds (default is 0, meaning automatic).')
     args = parser.parse_args()
 
@@ -594,6 +614,8 @@ if __name__ == '__main__':
     response_db = dir_path + common_paths["response_db"]
     conn_rsp = sqlite3.connect(response_db, check_same_thread = False)
     c_rsp = conn_rsp.cursor()
+
+    dataset_path = args.dataset_out if args.dataset_out else os.path.join(dir_path, common_paths["fuzz_dataset"])
 
     # Create tables
     try:

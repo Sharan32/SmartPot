@@ -421,6 +421,13 @@ class HoneypotRunner:
         """Start analytics dashboard for the honeypot instance."""
         self.step(4, "Start Analytics Dashboard")
 
+        if not self._ensure_port_free(self.dashboard_port):
+            self.log(
+                f"Cannot start dashboard because port {self.dashboard_port} is unavailable.",
+                "ERROR",
+            )
+            return False
+
         cmd = [
             "python3",
             os.path.join(self.root_dir, "core", "analyzer.py"),
