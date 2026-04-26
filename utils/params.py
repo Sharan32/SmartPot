@@ -46,7 +46,7 @@ scan_params = {}
 scan_params["password"] = "password"
 scan_params["www_dirname"] = "./www/"  # Updated path
 scan_params["timer"] = 3
-scan_params["header_num"] = 50
+scan_params["header_num"] = 10
 
 hardware_info = {
     "KERNELINFO": "(specify spec of kernel)",
@@ -62,7 +62,7 @@ train_params = {}
 train_params["batch_size"] = 512
 train_params["embed_size"] = 64
 train_params["hidden_size"] = 128
-train_params["epoch_num"] = 500
+train_params["epoch_num"] = 100
 train_params["max_input_len"] = 11 
 
 word2vec_params = {}
@@ -70,4 +70,3 @@ word2vec_params["window"] = 10
 word2vec_params["min_count"] = 1
 word2vec_params["iter"] = 200
 word2vec_params["workers"] = 5
-

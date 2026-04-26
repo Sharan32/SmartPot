@@ -16,10 +16,37 @@ import time
 import argparse
 import shutil
 import paramiko
+import sqlite3
 
 # My program
 from utils.utils import *
 from utils.params import common_paths
+
+
+def ensure_minimal_response_db(local_path):
+
+	response_db_path = os.path.join(local_path, "response.db")
+	conn = sqlite3.connect(response_db_path)
+	c = conn.cursor()
+
+	c.execute(
+		'create table if not exists response_table(res_id int, res_status int, res_headers text, res_body blob, UNIQUE(res_status, res_headers, res_body))'
+	)
+	c.execute(
+		'create table if not exists mapping_table(id int, word text, UNIQUE(id, word))'
+	)
+	c.execute(
+		"INSERT OR IGNORE INTO response_table values(?, ?, ?, ?)",
+		(
+			0,
+			200,
+			"Content-Type: text/html; charset=utf-8@@@Connection: close",
+			b"<html><body><h1>FirmPot</h1><p>Fallback response active.</p></body></html>",
+		),
+	)
+
+	conn.commit()
+	conn.close()
 
 #------------------------------------------------
 # Functions
@@ -52,7 +79,8 @@ def prepare_honeypot(local_path):
 	if os.path.exists(response_src):
 		shutil.copy(response_src, local_path)
 	else:
-		print("[!] response.db not found in honeypot/. Creating honeypot instance without it.")
+		print("[!] response.db not found in honeypot/. Creating a minimal fallback database.")
+		ensure_minimal_response_db(local_path)
 
 	# Copy the checkpoints of model
 	checkpoint_dir = os.path.join(honeypot_dir, "checkpoints")

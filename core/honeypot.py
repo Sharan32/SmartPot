@@ -256,6 +256,40 @@ def get_default_response():
     return 200, headers, body
 
 
+def ensure_response_db_schema(cursor, conn):
+    """Create the minimum response DB schema and seed data when artifacts are missing."""
+    cursor.execute(
+        '''
+        create table if not exists response_table(
+            res_id int,
+            res_status int,
+            res_headers text,
+            res_body blob,
+            UNIQUE(res_status, res_headers, res_body)
+        )
+        '''
+    )
+    cursor.execute(
+        '''
+        create table if not exists mapping_table(
+            id int,
+            word text,
+            UNIQUE(id, word)
+        )
+        '''
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO response_table values(?, ?, ?, ?)",
+        (
+            0,
+            200,
+            "Content-Type: text/html; charset=utf-8@@@Connection: close",
+            b"<html><body><h1>FirmPot</h1><p>Fallback response active.</p></body></html>",
+        ),
+    )
+    conn.commit()
+
+
 def get_usable_response(cursor, res_id):
     """Return a real HTTP response row, ignoring scanner sentinel status 599."""
     try:
@@ -749,13 +783,14 @@ if __name__ == '__main__':
     # Logfile paths
     if not os.path.exists(common_paths["logs"]):
         os.makedirs(common_paths["logs"])
-    accesslog = common_paths["logs"] + common_paths["access_log"]
-    honeypotlog = common_paths["logs"] + common_paths["honeypot_log"]
+    accesslog = common_paths["access_log"]
+    honeypotlog = common_paths["honeypot_log"]
 
     # Database
     db = common_paths["response_db"]
     conn = sqlite3.connect(db)
     c = conn.cursor()
+    ensure_response_db_schema(c, conn)
 
     # Mapping dictionary
     mapping = {}
@@ -767,8 +802,11 @@ if __name__ == '__main__':
         mapping = {"<PAD>": 0, "<END>": 1, "<EMP>": 2}
 
     # Get the max value of response_id
-    c.execute('select max(res_id) from response_table')
-    max_id = c.fetchall()[0][0]
+    try:
+        c.execute('select max(res_id) from response_table')
+        max_id = c.fetchall()[0][0]
+    except sqlite3.OperationalError:
+        max_id = 0
 
     # Set the max index
     if max_id is None:
