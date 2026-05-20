@@ -222,11 +222,3 @@ python3 pipeline/manager.py --create
 
 Use `--requests-only` or resume from the post-scan stages described above.
 
-## Suggested Next Cleanup
-
-The repository is now safe to publish, but these follow-up changes would make it even cleaner:
-
-- move historical material under `archive/` behind a clearer `legacy/` boundary
-- consolidate duplicated quickstart content from `QUICKSTART.md` into this README
-- move vendored `simstring/` sources into a dedicated `third_party/` directory
-- add a small `scripts/resume_after_scan.sh` helper for the post-scan workflow
